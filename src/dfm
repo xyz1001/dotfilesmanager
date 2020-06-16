@@ -5,6 +5,7 @@
 
 Usage:
     dfm add <path>
+    dfm rm <path> [-a]
 
 Commands:
     add 添加一个配置项，并将其移动至配置项目录并创建相应软链接
@@ -30,23 +31,34 @@ dotfiles_root = os.path.join(*[Path.home(), "dotfiles"])
 def __load_config():
     config_path = os.path.join(*[dotfiles_root, "dfm.yaml"])
     if not os.path.isfile(config_path):
-        return {}
+        return {"dotfiles": {}}
     with open(config_path) as fin:
         config = yaml.load(fin, Loader=yaml.SafeLoader)
+        if "dotfiles" not in config:
+            config["dotfiles"] = {}
         return config
 
 
 def __save_config(config):
     config_path = os.path.join(*[Path.home(), "dotfiles", "dfm.yaml"])
     with open(config_path, 'w') as fout:
+        print("save config to %s" % config_path)
         fout.write(yaml.dump(config, Dumper=yaml.SafeDumper))
+
+
+def __get_os_name():
+    return platform.system().lower()
 
 
 def __get_keep_path(path):
     relpath = os.path.relpath(path, Path.home())
     keep_path = os.path.join(
-        *[dotfiles_root, platform.system().lower(), relpath])
+        *[dotfiles_root, __get_os_name(), relpath])
     return keep_path
+
+
+def __normalize_path(abspath):
+    return abspath.replace(str(Path.home()), '~')
 
 
 def __add(path, config):
@@ -57,15 +69,30 @@ def __add(path, config):
     os.symlink(keep_path, abspath)
 
     df_path = os.path.relpath(keep_path, dotfiles_root)
-    home_path = os.path.relpath(abspath, Path.home())
-    if "dotfiles" not in config:
-        config["dotfiles"] = {}
+    raw_path = __normalize_path(abspath)
     if df_path not in config["dotfiles"]:
         config["dotfiles"][df_path] = {}
-    system = platform.system().lower()
-    if system not in config["dotfiles"][df_path]:
-        config["dotfiles"][df_path][system] = {}
-    config["dotfiles"][df_path][platform.system().lower()]["path"] = home_path
+    if __get_os_name() not in config["dotfiles"][df_path]:
+        config["dotfiles"][df_path][__get_os_name()] = {}
+    config["dotfiles"][df_path][__get_os_name()]["path"] = raw_path
+    return config
+
+
+def __rm(path, apply_all, config):
+    df_path = os.path.relpath(path, dotfiles_root)
+    if df_path not in config["dotfiles"]:
+        return config
+    if __get_os_name() not in config["dotfiles"][df_path]:
+        return config
+
+    realpath = os.path.expanduser(
+        config["dotfiles"][df_path][__get_os_name()]["path"])
+
+    os.unlink(realpath)
+    shutil.move(path, realpath)
+    del config["dotfiles"][df_path][__get_os_name()]
+    if not config["dotfiles"][df_path]:
+        del config["dotfiles"][df_path]
     return config
 
 
@@ -89,12 +116,24 @@ def __dispatch(args):
             print("%s has been kept in dotfiles" % path)
             exit(-1)
 
+    def check_rm_args():
+        path = os.path.abspath(args["<path>"])
+        if not path.startswith(dotfiles_root):
+            print("%s must be in dotfiles" % path)
+            exit(-1)
+
     if args["add"]:
         check_add_args()
 
         def add(config):
             return __add(args["<path>"], config)
         return add
+    elif args["rm"]:
+        check_rm_args()
+
+        def rm(config):
+            return __rm(args["<path>"], args["-a"], config)
+        return rm
     elif args["use"]:
         return __use
     else:
@@ -109,6 +148,7 @@ def main():
     print(config)
 
     config = __dispatch(args)(config)
+    print(config)
     __save_config(config)
 
 
