@@ -1,0 +1,10 @@
+dotfiles:
+  - file: linux/.gitconfig
+    windows:
+      - path: ~/.gitconfig
+    linux:
+      - path: ~/.gitconfig
+
+template:
+  - key: username
+    value: xyz1001
