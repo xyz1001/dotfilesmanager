@@ -6,6 +6,7 @@
 Usage:
     dfm add <path>
     dfm rm <path> [-a]
+    dfm install [<path>]
 
 Commands:
     add 添加一个配置项，并将其移动至配置项目录并创建相应软链接
@@ -88,7 +89,8 @@ def __rm(path, apply_all, config):
     realpath = os.path.expanduser(
         config["dotfiles"][df_path][__get_os_name()]["path"])
 
-    os.unlink(realpath)
+    if os.path.islink(realpath):
+        os.unlink(realpath)
     shutil.move(path, realpath)
     del config["dotfiles"][df_path][__get_os_name()]
     if not config["dotfiles"][df_path]:
@@ -96,7 +98,41 @@ def __rm(path, apply_all, config):
     return config
 
 
-def __use(args, config):
+def __install(path, config):
+    df_path = ""
+    if not path == "":
+        df_path = os.path.abspath(path)
+        if df_path not in config["dotfiles"]:
+            print("%s is not kept in dotfiles" % df_path)
+            return config
+        if __get_os_name() not in config["dotfiles"][df_path]:
+            return config
+    print("df_path: %s" % df_path)
+
+    for item in config["dotfiles"]:
+        if __get_os_name() not in config["dotfiles"][item]:
+            continue
+        item_path = os.path.join(dotfiles_root, item)
+        print(item_path)
+        if item_path != df_path and df_path != "":
+            continue
+        print(config["dotfiles"]
+              [item][__get_os_name()]["path"])
+        sym_path = os.path.expanduser(config["dotfiles"]
+                                      [item][__get_os_name()]["path"])
+        if os.path.islink(sym_path):
+            continue
+        elif os.path.exists(sym_path):
+            is_replace = input("文件 %s 已存在，是否替换？(y/N)" % sym_path)
+            if (is_replace.lower() != 'y'):
+                return False
+            else:
+                if os.path.isfile(sym_path) or os.path.islink(sym_path):
+                    os.remove(sym_path)
+                else:
+                    shutil.rmtree(sym_path)
+        os.symlink(item_path, os.path.expanduser(config["dotfiles"]
+                                                 [item][__get_os_name()]["path"]))
     return config
 
 
@@ -134,8 +170,10 @@ def __dispatch(args):
         def rm(config):
             return __rm(args["<path>"], args["-a"], config)
         return rm
-    elif args["use"]:
-        return __use
+    elif args["install"]:
+        def install(config):
+            return __install(args.get("[path]", ""), config)
+        return install
     else:
         return None
 
