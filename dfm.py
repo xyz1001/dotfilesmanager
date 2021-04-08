@@ -33,7 +33,7 @@ import shutil
 import hashlib
 
 
-dotfiles_root = os.path.join(*[Path.home(), "dotfiles_test"])
+dotfiles_root = os.path.join(*[Path.home(), "dotfiles"])
 
 
 def __load_config():
