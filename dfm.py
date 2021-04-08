@@ -137,7 +137,7 @@ def __install(path, config):
         item_path = os.path.join(dotfiles_root, item)
         sym_path = os.path.expanduser(
             config["dotfiles"][item][os_name]["path"])
-        if os.path.exists(sym_path):
+        if os.path.lexists(sym_path):
             is_replace = input("文件 %s 已存在，是否替换？(y/N)" % sym_path)
             if (is_replace.lower() != 'y'):
                 continue
@@ -167,7 +167,7 @@ def __share(src_path, dst_path, config):
         config["dotfiles"][df_path][os_name]["path"] = __normalize_path(
             dst_path)
 
-    if os.path.exists(dst_path):
+    if os.path.lexists(dst_path):
         is_replace = input("文件 %s 已存在，是否替换？(y/N)" % dst_path)
         if (is_replace.lower() != 'y'):
             return config
@@ -176,7 +176,7 @@ def __share(src_path, dst_path, config):
                 os.remove(dst_path)
             else:
                 shutil.rmtree(dst_path)
-    os.symlink(src_path, dst_path)
+    os.symlink(os.path.abspath(src_path), dst_path)
     print("share %s -> %s" % (df_path, dst_path))
     return config
 
