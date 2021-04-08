@@ -50,7 +50,6 @@ def __load_config():
 def __save_config(config):
     config_path = os.path.join(*[dotfiles_root, "dfm.yaml"])
     with open(config_path, 'w') as fout:
-        print("save config to %s" % config_path)
         fout.write(yaml.dump(config, Dumper=yaml.SafeDumper))
 
 
@@ -86,6 +85,7 @@ def __add(path, config):
     if __get_os_name() not in config["dotfiles"][df_path]:
         config["dotfiles"][df_path][__get_os_name()] = {}
     config["dotfiles"][df_path][__get_os_name()]["path"] = raw_path
+    print("Add %s to %s" % (abspath, df_path))
     return config
 
 
@@ -113,6 +113,7 @@ def __rm(path, config):
     else:
         shutil.move(path, realpath)
         del config["dotfiles"][df_path]
+    print("Remove %s" % df_path)
     return config
 
 
@@ -145,8 +146,10 @@ def __install(path, config):
                     os.remove(sym_path)
                 else:
                     shutil.rmtree(sym_path)
-        os.symlink(item_path, os.path.expanduser(config["dotfiles"]
-                                                 [item][os_name]["path"]))
+        dst_path = os.path.expanduser(config["dotfiles"]
+                                      [item][os_name]["path"])
+        os.symlink(item_path, dst_path)
+        print("Install %s -> %s" % (item, dst_path))
     return config
 
 
@@ -174,12 +177,13 @@ def __share(src_path, dst_path, config):
             else:
                 shutil.rmtree(dst_path)
     os.symlink(src_path, dst_path)
+    print("share %s -> %s" % (df_path, dst_path))
     return config
 
 
 def __dispatch(args):
     def check_add_args():
-        path = os.path.abspath(args["<path>"])
+        path = os.path.abspath(args["<dotfile_path>"])
         if not os.path.isfile(path) and not os.path.isdir(path):
             print("%s is not valid file or directory" % path)
             exit(-1)
@@ -228,13 +232,9 @@ def __dispatch(args):
 
 def main():
     args = docopt(__doc__)
-    print(args)
 
     config = __load_config()
-    print(config)
-
     config = __dispatch(args)(config)
-    print(config)
     __save_config(config)
 
 

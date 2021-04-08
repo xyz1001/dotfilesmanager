@@ -5,7 +5,7 @@ from setuptools import setup, find_packages
 
 setup(
     name='dotfilesmanager',
-    version="1.0.1",
+    version="1.0.2",
     description="dotfiles管理工具",
     long_description="""dotfile管理工具，支持多平台""",
     keywords='python dotfiles',
