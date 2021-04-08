@@ -106,7 +106,10 @@ def __rm(path, config):
     del config["dotfiles"][df_path][__get_os_name()]
 
     if config["dotfiles"][df_path]:
-        shutil.copy(path, realpath)
+        if os.path.isfile(path):
+            shutil.copy(path, realpath)
+        else:
+            shutil.copytree(path, realpath)
     else:
         shutil.move(path, realpath)
         del config["dotfiles"][df_path]
