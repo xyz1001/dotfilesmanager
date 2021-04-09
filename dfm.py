@@ -4,10 +4,10 @@
 dotfile管理工具(dotfiles manager)，dotfile指保存配置信息的文件或包含配置文件的文件夹
 
 Usage:
-    dfm add <dotfile_path>
+    dfm add <install_path>
     dfm rm <path>
-    dfm install [<dotfile_path>]
-    dfm share <dotfile_path> <install_path>
+    dfm install [<install_path>]
+    dfm share <save_path> <install_path>
 
 Commands:
     add 添加一个dotfile，并将其移动至配置项目录并创建相应软链接
@@ -16,9 +16,9 @@ Commands:
     share 共享一个dotfile，共享一个其他平台已添加的dotfile并安装
 
 Arguments:
-    path dotfile_path或install_path
-    dotfile_path 位于dotfiles中的dotfile路径
-    install_path 安装路径
+    path save_path或install_path
+    save_path dotfile位于dotfiles中的保存路径
+    install_path dotfile的安装路径
 
 Options:
     -h --help
@@ -57,133 +57,150 @@ def __get_os_name():
     return platform.system().lower()
 
 
-def __get_keep_path(path):
+def __normalize_path(path):
+    if path is None:
+        return None
+    return os.path.abspath(os.path.normpath(path))
+
+
+# opposite of os.path.expanduser
+def __shrinkuser(path):
+    if path is None:
+        return None
+
+    home = str(Path.home())
+    if path.startswith(home):
+        path = path.replace(home, '~', 1)
+    return path
+
+
+def __get_save_path(install_path):
+    install_path = __shrinkuser(install_path)
     md5 = hashlib.md5()
-    md5.update(str(os.path.dirname(path)).encode("utf8"))
-    keep_dir = md5.hexdigest()
+    md5.update(str(os.path.dirname(install_path)).encode("utf8"))
+    save_dir = md5.hexdigest()
 
-    filename = os.path.relpath(path, Path.home())
-    keep_path = os.path.join(*[dotfiles_root, keep_dir, filename])
-    return keep_path
-
-
-def __normalize_path(abspath):
-    return abspath.replace(str(Path.home()), '~')
+    filename = os.path.basename(install_path)
+    save_path = os.path.join(*[dotfiles_root, save_dir, filename])
+    return save_path
 
 
-def __add(path, config):
-    abspath = os.path.abspath(path)
-    keep_path = __get_keep_path(abspath)
-    os.makedirs(os.path.dirname(keep_path), exist_ok=True)
-    shutil.move(abspath, keep_path)
-    os.symlink(keep_path, abspath)
+def __mklink(target, link):
+    if not os.path.isdir(os.path.dirname(link)):
+        os.makedirs(os.path.dirname(link), exist_ok=True)
+    if os.path.lexists(link):
+        is_replace = input("文件 %s 已存在，是否替换？(y/N)" % link)
+        if is_replace.lower() != 'y':
+            return False
 
-    df_path = os.path.relpath(keep_path, dotfiles_root)
-    raw_path = __normalize_path(abspath)
-    if df_path not in config["dotfiles"]:
-        config["dotfiles"][df_path] = {}
-    if __get_os_name() not in config["dotfiles"][df_path]:
-        config["dotfiles"][df_path][__get_os_name()] = {}
-    config["dotfiles"][df_path][__get_os_name()]["path"] = raw_path
-    print("Add %s to %s" % (abspath, df_path))
+        if os.path.islink(link) or os.path.isfile(link):
+            os.remove(link)
+        else:
+            shutil.rmtree(link)
+    os.symlink(target, link)
+    return True
+
+
+def __set_path(config, rel_save_path, install_path):
+    os_name = __get_os_name()
+    if rel_save_path not in config["dotfiles"]:
+        config["dotfiles"][rel_save_path] = {}
+    if os_name not in config["dotfiles"][rel_save_path]:
+        config["dotfiles"][rel_save_path][os_name] = {}
+    config["dotfiles"][rel_save_path][os_name]["path"] = __shrinkuser(
+        install_path)
     return config
+
+
+def __get_path(config, rel_save_path):
+    os_name = __get_os_name()
+    if rel_save_path not in config["dotfiles"]:
+        return None
+    if os_name not in config["dotfiles"][rel_save_path]:
+        return None
+    install_path = config["dotfiles"][rel_save_path][os_name]["path"]
+    return os.path.expanduser(install_path)
+
+
+def __add(install_path, config):
+    abs_save_path = __get_save_path(install_path)
+    os.makedirs(os.path.dirname(abs_save_path), exist_ok=True)
+    shutil.move(install_path, abs_save_path)
+    os.symlink(abs_save_path, install_path)
+
+    rel_save_path = os.path.relpath(abs_save_path, dotfiles_root)
+    print("Add %s to %s" % (install_path, rel_save_path))
+    return __set_path(config, rel_save_path, install_path)
 
 
 def __rm(path, config):
+    abs_save_path = path
     if os.path.islink(path):
-        path = os.readlink(path)
-    df_path = os.path.relpath(path, dotfiles_root)
-    if df_path not in config["dotfiles"]:
+        abs_save_path = os.readlink(path)
+    rel_save_path = os.path.relpath(abs_save_path, dotfiles_root)
+
+    install_path = __get_path(config, rel_save_path)
+    if install_path is None:
         return config
-    if __get_os_name() not in config["dotfiles"][df_path]:
-        return config
 
-    realpath = os.path.expanduser(
-        config["dotfiles"][df_path][__get_os_name()]["path"])
+    if os.path.islink(install_path):
+        os.unlink(install_path)
+    del config["dotfiles"][rel_save_path][__get_os_name()]
 
-    if os.path.islink(realpath):
-        os.unlink(realpath)
-    del config["dotfiles"][df_path][__get_os_name()]
-
-    if config["dotfiles"][df_path]:
-        if os.path.isfile(path):
-            shutil.copy(path, realpath)
+    if config["dotfiles"][rel_save_path]:
+        if os.path.isfile(abs_save_path):
+            shutil.copy(abs_save_path, install_path)
         else:
-            shutil.copytree(path, realpath)
+            shutil.copytree(abs_save_path, install_path)
     else:
-        shutil.move(path, realpath)
-        del config["dotfiles"][df_path]
-    print("Remove %s" % df_path)
+        shutil.move(abs_save_path, install_path)
+        del config["dotfiles"][rel_save_path]
+    abs_save_dir = os.path.dirname(abs_save_path)
+    if len(os.listdir(abs_save_dir)) == 0:
+        os.rmdir(abs_save_dir)
+
+    print("Remove %s" % rel_save_path)
     return config
 
 
-def __install(path, config):
-    os_name = __get_os_name()
-
-    df_path = ""
-    if path is not None:
-        df_path = os.path.relpath(path, dotfiles_root)
-        if df_path not in config["dotfiles"]:
-            print("%s is not kept in dotfiles" % df_path)
-            return config
-        if os_name not in config["dotfiles"][df_path]:
+def __install(abs_save_path, config):
+    rel_save_path = None
+    if abs_save_path is not None:
+        rel_save_path = os.path.relpath(abs_save_path, dotfiles_root)
+        if __get_path(config, rel_save_path) is None:
+            print("%s is not kept in dotfiles" % rel_save_path)
             return config
 
-    for item in config["dotfiles"]:
-        if os_name not in config["dotfiles"][item]:
+    for item_rel_save_path in config["dotfiles"]:
+        if rel_save_path is not None and item_rel_save_path != rel_save_path:
             continue
-        if df_path != "" and item != df_path:
+
+        item_install_path = __get_path(config, item_rel_save_path)
+        if item_install_path is None:
             continue
-        item_path = os.path.join(dotfiles_root, item)
-        sym_path = os.path.expanduser(
-            config["dotfiles"][item][os_name]["path"])
-        if os.path.lexists(sym_path):
-            is_replace = input("文件 %s 已存在，是否替换？(y/N)" % sym_path)
-            if (is_replace.lower() != 'y'):
-                continue
-            else:
-                if os.path.isfile(sym_path) or os.path.islink(sym_path):
-                    os.remove(sym_path)
-                else:
-                    shutil.rmtree(sym_path)
-        dst_path = os.path.expanduser(config["dotfiles"]
-                                      [item][os_name]["path"])
-        os.symlink(item_path, dst_path)
-        print("Install %s -> %s" % (item, dst_path))
+        item_abs_save_path = os.path.join(dotfiles_root, item_rel_save_path)
+
+        if __mklink(item_abs_save_path, item_install_path):
+            print("Install %s -> %s" % (item_rel_save_path, item_install_path))
     return config
 
 
-def __share(src_path, dst_path, config):
-    os_name = __get_os_name()
-    df_path = os.path.relpath(src_path, dotfiles_root)
-    dst_path = os.path.abspath(dst_path)
-
-    if df_path not in config["dotfiles"]:
-        print("%s is not kept in dotfiles" % df_path)
+def __share(abs_save_path, install_path, config):
+    rel_save_path = os.path.relpath(abs_save_path, dotfiles_root)
+    if rel_save_path not in config["dotfiles"]:
+        print("%s is not kept in dotfiles" % rel_save_path)
         return config
 
-    if os_name not in config["dotfiles"][df_path]:
-        config["dotfiles"][df_path][os_name] = {}
-        config["dotfiles"][df_path][os_name]["path"] = __normalize_path(
-            dst_path)
+    config = __set_path(config, rel_save_path, install_path)
 
-    if os.path.lexists(dst_path):
-        is_replace = input("文件 %s 已存在，是否替换？(y/N)" % dst_path)
-        if (is_replace.lower() != 'y'):
-            return config
-        else:
-            if os.path.isfile(dst_path) or os.path.islink(dst_path):
-                os.remove(dst_path)
-            else:
-                shutil.rmtree(dst_path)
-    os.symlink(os.path.abspath(src_path), dst_path)
-    print("share %s -> %s" % (df_path, dst_path))
+    if __mklink(abs_save_path, install_path):
+        print("share %s -> %s" % (rel_save_path, install_path))
     return config
 
 
 def __dispatch(args):
     def check_add_args():
-        path = os.path.abspath(args["<dotfile_path>"])
+        path = __normalize_path((args["<install_path>"]))
         if not os.path.isfile(path) and not os.path.isdir(path):
             print("%s is not valid file or directory" % path)
             exit(-1)
@@ -193,12 +210,12 @@ def __dispatch(args):
         if not path.startswith(str(Path.home())):
             print("%s must be in home" % path)
             exit(-1)
-        if os.path.exists(__get_keep_path(path)):
+        if os.path.exists(__get_save_path(path)):
             print("%s has been kept in dotfiles" % path)
             exit(-1)
 
     def check_rm_args():
-        raw_path = os.path.abspath(args["<path>"])
+        raw_path = __normalize_path(args["<path>"])
         path = raw_path
         if os.path.islink(raw_path):
             path = os.readlink(raw_path)
@@ -210,21 +227,22 @@ def __dispatch(args):
         check_add_args()
 
         def add(config):
-            return __add(args["<dotfile_path>"], config)
+            return __add(__normalize_path(args["<install_path>"]), config)
         return add
     elif args["rm"]:
         check_rm_args()
 
         def rm(config):
-            return __rm(args["<path>"], config)
+            return __rm(__normalize_path(args["<path>"]), config)
         return rm
     elif args["install"]:
         def install(config):
-            return __install(args["<install_path>"], config)
+            return __install(__normalize_path(args["<save_path>"]), config)
         return install
     elif args["share"]:
         def share(config):
-            return __share(args["<dotfile_path>"], args["<install_path>"], config)
+            return __share(__normalize_path(args["<save_path>"]),
+                           __normalize_path(args["<install_path>"]), config)
         return share
     else:
         return None
