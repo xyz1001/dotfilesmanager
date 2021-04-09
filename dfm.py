@@ -53,7 +53,7 @@ def __load_config():
 
 def __save_config(config):
     config_path = os.path.join(*[dotfiles_root, "dfm.yaml"])
-    with open(config_path, 'w') as fout:
+    with open(config_path, 'w', newline='\n') as fout:
         fout.write(yaml.dump(config, Dumper=yaml.SafeDumper))
 
 
