@@ -1,12 +1,13 @@
-#!/usr/bin/env python
+#! /usr/bin/env python
+
 
 '''
 dotfile管理工具(dotfiles manager)，dotfile指保存配置信息的文件或包含配置文件的文件夹
 
 Usage:
-    dfm add <install_path>
+    dfm add <install_path> [--system]
     dfm rm <path>
-    dfm install [<install_path>]
+    dfm install [<save_path>]
     dfm share <save_path> <install_path>
 
 Commands:
@@ -21,7 +22,8 @@ Arguments:
     install_path dotfile的安装路径
 
 Options:
-    -h --help
+    -h --help  显示帮助
+    --system  该dotfile和操作系统相关
 '''
 
 from docopt import docopt
@@ -89,14 +91,15 @@ def __shrinkuser(path):
     return path
 
 
-def __get_save_path(install_path):
+def __get_save_path(install_path, system):
     install_path = __shrinkuser(install_path)
     md5 = hashlib.md5()
     md5.update(str(os.path.dirname(install_path)).encode("utf8"))
     save_dir = md5.hexdigest()
 
     filename = os.path.basename(install_path)
-    save_path = os.path.join(*[dotfiles_root, save_dir, filename])
+    system_sep = __get_os_name() if system else ""
+    save_path = os.path.join(*[dotfiles_root, save_dir, system_sep, filename])
     return save_path
 
 
@@ -137,8 +140,8 @@ def __get_path(config, rel_save_path):
     return __expanduser(install_path)
 
 
-def __add(install_path, config):
-    abs_save_path = __get_save_path(install_path)
+def __add(install_path, system, config):
+    abs_save_path = __get_save_path(install_path, system)
     os.makedirs(os.path.dirname(abs_save_path), exist_ok=True)
     shutil.move(install_path, abs_save_path)
     os.symlink(abs_save_path, install_path)
@@ -221,6 +224,7 @@ def __share(abs_save_path, install_path, config):
 def __dispatch(args):
     def check_add_args():
         path = __normalize_path((args["<install_path>"]))
+        system = args["--system"]
         if not os.path.isfile(path) and not os.path.isdir(path):
             print("%s is not valid file or directory" % path)
             exit(-1)
@@ -230,7 +234,7 @@ def __dispatch(args):
         if not path.startswith(str(Path.home())):
             print("%s must be in home" % path)
             exit(-1)
-        if os.path.exists(__get_save_path(path)):
+        if os.path.exists(__get_save_path(path, system)):
             print("%s has been kept in dotfiles" % path)
             exit(-1)
 
@@ -247,7 +251,8 @@ def __dispatch(args):
         check_add_args()
 
         def add(config):
-            return __add(__normalize_path(args["<install_path>"]), config)
+            return __add(__normalize_path(args["<install_path>"]),
+                         args["--system"], config)
         return add
     elif args["rm"]:
         check_rm_args()
@@ -273,7 +278,7 @@ def main():
         if ctypes.windll.shell32.IsUserAnAdmin() == 0:
             print("dfm must run with Administrator priviledges under Windows")
             return
-        
+
     args = docopt(__doc__)
 
     config = __load_config()

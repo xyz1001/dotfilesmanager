@@ -1,11 +1,11 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
 
-from setuptools import setup, find_packages
+from setuptools import setup
 
 setup(
     name='dotfilesmanager',
-    version="1.0.6",
+    version="1.1.0",
     description="dotfiles管理工具",
     long_description="""dotfile管理工具，支持多平台""",
     keywords='python dotfiles',
