@@ -32,6 +32,7 @@ import platform
 import shutil
 import hashlib
 import posixpath
+import ctypes
 
 
 dotfiles_root = os.path.join(*[Path.home(), "dotfiles"])
@@ -61,7 +62,20 @@ def __get_os_name():
 def __normalize_path(path):
     if path is None:
         return None
-    return os.path.abspath(os.path.normpath(path))
+    return os.path.abspath(os.path.normpath(__expanduser(path)))
+
+
+def __expanduser(path):
+    if path is None:
+        return None
+
+    if __get_os_name() != "windows":
+        return os.path.expanduser(path)
+
+    home = str(Path.home())
+    if path.startswith('~'):
+        path = path.replace('~', home, 1)
+    return path
 
 
 # opposite of os.path.expanduser
@@ -120,7 +134,7 @@ def __get_path(config, rel_save_path):
     if os_name not in config["dotfiles"][rel_save_path]:
         return None
     install_path = config["dotfiles"][rel_save_path][os_name]["path"]
-    return os.path.expanduser(install_path)
+    return __expanduser(install_path)
 
 
 def __add(install_path, config):
@@ -255,6 +269,11 @@ def __dispatch(args):
 
 
 def main():
+    if __get_os_name() == "windows":
+        if ctypes.windll.shell32.IsUserAnAdmin() == 0:
+            print("dfm must run with Administrator priviledges under Windows")
+            return
+        
     args = docopt(__doc__)
 
     config = __load_config()
