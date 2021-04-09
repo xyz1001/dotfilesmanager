@@ -31,6 +31,7 @@ import os
 import platform
 import shutil
 import hashlib
+import posixpath
 
 
 dotfiles_root = os.path.join(*[Path.home(), "dotfiles"])
@@ -129,6 +130,7 @@ def __add(install_path, config):
     os.symlink(abs_save_path, install_path)
 
     rel_save_path = os.path.relpath(abs_save_path, dotfiles_root)
+    rel_save_path = rel_save_path.replace(os.sep, posixpath.sep)
     print("Add %s to %s" % (install_path, rel_save_path))
     return __set_path(config, rel_save_path, install_path)
 
@@ -138,6 +140,7 @@ def __rm(path, config):
     if os.path.islink(path):
         abs_save_path = os.readlink(path)
     rel_save_path = os.path.relpath(abs_save_path, dotfiles_root)
+    rel_save_path = rel_save_path.replace(os.sep, posixpath.sep)
 
     install_path = __get_path(config, rel_save_path)
     if install_path is None:
@@ -167,6 +170,7 @@ def __install(abs_save_path, config):
     rel_save_path = None
     if abs_save_path is not None:
         rel_save_path = os.path.relpath(abs_save_path, dotfiles_root)
+        rel_save_path = rel_save_path.replace(os.sep, posixpath.sep)
         if __get_path(config, rel_save_path) is None:
             print("%s is not kept in dotfiles" % rel_save_path)
             return config
@@ -179,6 +183,7 @@ def __install(abs_save_path, config):
         if item_install_path is None:
             continue
         item_abs_save_path = os.path.join(dotfiles_root, item_rel_save_path)
+        item_abs_save_path = item_abs_save_path.replace(posixpath.sep, os.sep)
 
         if __mklink(item_abs_save_path, item_install_path):
             print("Install %s -> %s" % (item_rel_save_path, item_install_path))
@@ -187,6 +192,7 @@ def __install(abs_save_path, config):
 
 def __share(abs_save_path, install_path, config):
     rel_save_path = os.path.relpath(abs_save_path, dotfiles_root)
+    rel_save_path = rel_save_path.replace(os.sep, posixpath.sep)
     if rel_save_path not in config["dotfiles"]:
         print("%s is not kept in dotfiles" % rel_save_path)
         return config
