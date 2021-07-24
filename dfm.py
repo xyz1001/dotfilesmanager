@@ -27,7 +27,6 @@ Options:
 '''
 
 from docopt import docopt
-from pathlib import Path
 import yaml
 import os
 import platform
@@ -37,7 +36,7 @@ import posixpath
 import ctypes
 
 
-dotfiles_root = os.path.join(*[Path.home(), "dotfiles"])
+dotfiles_root = os.path.join(*[os.path.expanduser("~"), "dotfiles"])
 
 
 def __load_config():
@@ -74,7 +73,7 @@ def __expanduser(path):
     if __get_os_name() != "windows":
         return os.path.expanduser(path)
 
-    home = str(Path.home())
+    home = str(os.path.expanduser("~"))
     if path.startswith('~'):
         path = path.replace('~', home, 1)
     return path
@@ -85,7 +84,7 @@ def __shrinkuser(path):
     if path is None:
         return None
 
-    home = str(Path.home())
+    home = str(os.path.expanduser("~"))
     if path.startswith(home):
         path = path.replace(home, '~', 1)
     return path
@@ -231,7 +230,7 @@ def __dispatch(args):
         if path.startswith(dotfiles_root):
             print("%s cannot be in dotfiles" % path)
             exit(-1)
-        if not path.startswith(str(Path.home())):
+        if not path.startswith(str(os.path.expanduser("~"))):
             print("%s must be in home" % path)
             exit(-1)
         if os.path.exists(__get_save_path(path, system)):
