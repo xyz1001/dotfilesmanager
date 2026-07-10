@@ -10,13 +10,23 @@
 pip install dotfilesmanager
 ```
 
-从源码目录安装：
+从源码目录安装（含开发与验证工具）：
 
 ```bash
-pip install .
+python -m pip install -e '.[dev]'
 ```
 
 安装后可使用 `dfm` 命令。
+
+开发验证：
+
+```bash
+ruff check .
+ruff format --check .
+dfm --help
+python -m build
+twine check dist/*
+```
 
 ## 命令
 
@@ -50,7 +60,7 @@ dfm share <save_path> <install_path>
 
 在 PyPI 项目的 **Publishing** 设置中配置 GitHub Trusted Publisher，仓库填写
 `xyz1001/dotfilesmanager`，workflow 填写 `publish.yml`，environment 填写 `pypi`。发布
-tag 必须与 `setup.py` 中的版本一致，并以 `v` 开头，例如版本为 `1.1.5` 时：
+tag 必须与 `pyproject.toml` 中的版本一致，并以 `v` 开头，例如版本为 `1.1.5` 时：
 
 ```bash
 git tag v1.1.5

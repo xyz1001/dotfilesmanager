@@ -25,18 +25,12 @@ jobs:
           TAG_NAME: ${{ github.ref_name }}
         run: |
           package_version="$(python - <<'PY'
-          import ast
+          import tomllib
 
-          with open('setup.py', encoding='utf-8') as setup_file:
-              tree = ast.parse(setup_file.read(), filename='setup.py')
+          with open('pyproject.toml', 'rb') as pyproject_file:
+              pyproject = tomllib.load(pyproject_file)
 
-          for node in ast.walk(tree):
-              if isinstance(node, ast.Call) and getattr(node.func, 'id', None) == 'setup':
-                  for keyword in node.keywords:
-                      if keyword.arg == 'version' and isinstance(keyword.value, ast.Constant):
-                          print(keyword.value.value)
-                          raise SystemExit
-          raise SystemExit('Could not extract a literal version from setup.py')
+          print(pyproject['project']['version'])
           PY
           )"
           test "${TAG_NAME#v}" = "$package_version"

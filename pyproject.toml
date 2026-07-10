@@ -2,6 +2,38 @@
 requires = ["setuptools>=61"]
 build-backend = "setuptools.build_meta"
 
+[project]
+name = "dotfilesmanager"
+version = "1.1.5"
+description = "dotfile管理工具，支持多平台"
+readme = "README.md"
+requires-python = ">=3.8"
+license = "MIT"
+license-files = ["LICENSE"]
+authors = [
+    { name = "xyz1001", email = "zgzf1001@gmail.com" },
+]
+keywords = ["python", "dotfiles"]
+classifiers = [
+    "Programming Language :: Python :: 3",
+]
+dependencies = [
+    "docopt>=0.6.2",
+    "PyYAML>=6.0",
+]
+
+[project.urls]
+Repository = "https://github.com/xyz1001/dotfilesmanager"
+
+[project.scripts]
+dfm = "dfm:main"
+
+[tool.setuptools]
+py-modules = ["dfm"]
+
+[project.optional-dependencies]
+dev = ["build", "twine", "ruff", "pytest"]
+
 [tool.ruff]
 target-version = "py38"
 line-length = 88
