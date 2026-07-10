@@ -19,8 +19,12 @@ jobs:
           python-version: '3.11'
       - name: Upgrade pip
         run: python -m pip install --upgrade pip
-      - name: Install package and build tools
-        run: python -m pip install . build twine
+      - name: Install package, build tools, and linter
+        run: python -m pip install . build twine ruff
+      - name: Lint
+        run: ruff check .
+      - name: Check formatting
+        run: ruff format --check .
       - name: Verify command-line interface
         run: dfm --help
       - name: Build distribution
