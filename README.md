@@ -45,3 +45,16 @@ dfm share <save_path> <install_path>
 - `add` 仅接受家目录（`~`）内的文件或目录，且不能纳管 `~/dotfiles` 内的内容。
 - 安装或共享时，如目标路径已存在，程序会询问是否覆盖；仅输入 `y` 才会替换。
 - Windows 上运行 `dfm` 需要管理员权限，以便创建符号链接。
+
+## 发布到 PyPI
+
+在 PyPI 项目的 **Publishing** 设置中配置 GitHub Trusted Publisher，仓库填写
+`xyz1001/dotfilesmanager`，workflow 填写 `publish.yml`，environment 填写 `pypi`。发布
+tag 必须与 `setup.py` 中的版本一致，并以 `v` 开头，例如版本为 `1.1.5` 时：
+
+```bash
+git tag v1.1.5
+git push origin v1.1.5
+```
+
+推送该 tag 后，GitHub Actions 会构建、检查并通过 Trusted Publishing 发布到 PyPI。
