@@ -8,6 +8,37 @@ import pytest
 from dotfilesmanager import cli, operations
 
 
+@pytest.fixture(autouse=True)
+def no_real_transactions(monkeypatch):
+    """Dispatch tests exercise the adapter, not its on-disk transaction layer."""
+
+    class Lock:
+        def __init__(self, root):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            pass
+
+    class Transaction:
+        def __init__(self, *args):
+            pass
+
+        def begin(self):
+            pass
+
+        def commit(self):
+            pass
+
+        def rollback(self):
+            pass
+
+    monkeypatch.setattr(cli.transaction, "ProcessLock", Lock)
+    monkeypatch.setattr(cli.transaction, "Transaction", Transaction)
+
+
 def _args(command, **values):
     args = {"add": False, "rm": False, "install": False, "share": False}
     args[command] = True
@@ -93,6 +124,18 @@ def test_main_dispatches_remaining_commands_and_saves(
         Mock(side_effect=lambda path: None if path is None else f"/{path}"),
     )
     monkeypatch.setattr(cli.operations, "validate_remove", Mock(return_value=None))
+    monkeypatch.setattr(
+        cli.operations, "validate_saved_object", Mock(return_value=None)
+    )
+    monkeypatch.setattr(
+        cli.operations, "validate_install_target", Mock(return_value=None)
+    )
+    monkeypatch.setattr(
+        cli.operations, "validate_install_sources", Mock(return_value=None)
+    )
+    monkeypatch.setattr(
+        cli.operations, "validate_remove_destination", Mock(return_value=None)
+    )
     remove = Mock(return_value=result)
     install = Mock(return_value=result)
     share = Mock(return_value=result)
@@ -107,7 +150,7 @@ def test_main_dispatches_remaining_commands_and_saves(
     operation, paths = expected
     if operation == "remove":
         cli.operations.validate_remove.assert_called_once_with("/path", "/repo")
-        remove.assert_called_once_with(*paths, dotfiles_config, "/repo")
+        remove.assert_called_once_with(*paths, dotfiles_config, "/repo", False)
         install.assert_not_called()
         share.assert_not_called()
     elif operation == "install":
@@ -122,7 +165,11 @@ def test_main_dispatches_remaining_commands_and_saves(
         )
         remove.assert_not_called()
         install.assert_not_called()
-    save.assert_called_once_with("/repo", result.config)
+    if command == "share":
+        # A no-op/rejected share must not rewrite YAML.
+        save.assert_not_called()
+    else:
+        save.assert_called_once_with("/repo", result.config)
 
 
 @pytest.mark.parametrize(

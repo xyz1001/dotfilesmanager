@@ -4,6 +4,7 @@ This module deliberately does not read input, print output, or choose process
 exit codes. Callers provide confirmation callbacks and render operation results.
 """
 
+import copy
 import hashlib
 import ntpath
 import os
@@ -100,6 +101,107 @@ def validate_remove(path, dotfiles_root):
     return None
 
 
+def validate_config(config, dotfiles_root):
+    """Return validation errors before configuration-derived paths are touched."""
+    errors = []
+    if not isinstance(config, dict) or not isinstance(config.get("dotfiles"), dict):
+        return ["dfm.yaml must contain a dotfiles mapping"]
+    for rel_path, systems in config["dotfiles"].items():
+        if not isinstance(rel_path, str) or not rel_path or os.path.isabs(rel_path):
+            errors.append("invalid saved path in dfm.yaml")
+            continue
+        saved = os.path.abspath(
+            os.path.join(dotfiles_root, rel_path.replace("/", os.sep))
+        )
+        if not _is_within(saved, dotfiles_root):
+            errors.append("saved path escapes dotfiles root")
+        if not isinstance(systems, dict):
+            errors.append("invalid system mapping in dfm.yaml")
+            continue
+        for system, item in systems.items():
+            if (
+                not isinstance(system, str)
+                or not isinstance(item, dict)
+                or not isinstance(item.get("path"), str)
+            ):
+                errors.append("invalid install path in dfm.yaml")
+                continue
+            # Foreign-platform records are data only: do not reject a valid
+            # macOS/Windows path merely because it is not meaningful locally.
+            if system == os_name():
+                install = normalize_path(item["path"])
+                if not _is_within(install, os.path.expanduser("~")) or _is_within(
+                    install, dotfiles_root
+                ):
+                    errors.append("configured install path is outside home")
+    return errors
+
+
+def validate_save_path(path, dotfiles_root):
+    if path is None or not _is_within(path, dotfiles_root):
+        return f"{path} is not in dotfiles"
+    return None
+
+
+def validate_install_target(path, dotfiles_root):
+    if not _is_within(path, os.path.expanduser("~")) or _is_within(path, dotfiles_root):
+        return f"{path} must be in home and outside dotfiles"
+    return None
+
+
+def validate_saved_object(path, dotfiles_root):
+    error = validate_save_path(path, dotfiles_root)
+    if error:
+        return error
+    if not os.path.isfile(path) and not os.path.isdir(path):
+        return f"{path} is not a supported saved file or directory"
+    return None
+
+
+def validate_install_sources(config, dotfiles_root, abs_save_path=None):
+    """Ensure every current-platform object to install exists before prompts."""
+    selected = None
+    if abs_save_path is not None:
+        selected = os.path.relpath(abs_save_path, dotfiles_root).replace(os.sep, "/")
+    for rel_path in config["dotfiles"]:
+        if selected is not None and rel_path != selected:
+            continue
+        if get_path(config, rel_path) is None:
+            continue
+        saved = os.path.join(dotfiles_root, rel_path.replace("/", os.sep))
+        error = validate_saved_object(saved, dotfiles_root)
+        if error:
+            return error
+    return None
+
+
+def validate_remove_destination(config, rel_save_path, dotfiles_root=None, force=False):
+    """Do not let rm overwrite an unrelated file at its install destination."""
+    install = get_path(config, rel_save_path)
+    if (
+        not force
+        and install is not None
+        and os.path.lexists(install)
+        and not os.path.islink(install)
+    ):
+        return f"{install} is not a managed link; refusing to overwrite it"
+    if (
+        not force
+        and install is not None
+        and os.path.islink(install)
+        and dotfiles_root is not None
+    ):
+        target = os.readlink(install)
+        if not os.path.isabs(target):
+            target = os.path.join(os.path.dirname(install), target)
+        expected = os.path.join(dotfiles_root, rel_save_path.replace("/", os.sep))
+        if os.path.abspath(os.path.normpath(target)) != os.path.abspath(
+            os.path.normpath(expected)
+        ):
+            return f"{install} is not a managed link; refusing to overwrite it"
+    return None
+
+
 def set_path(config, rel_save_path, install_path):
     current_os = os_name()
     config["dotfiles"].setdefault(rel_save_path, {}).setdefault(current_os, {})[
@@ -141,7 +243,7 @@ def add(install_path, system, config, dotfiles_root):
     )
 
 
-def remove(path, config, dotfiles_root):
+def remove(path, config, dotfiles_root, force=False):
     abs_save_path = _remove_save_path(path, dotfiles_root)
     rel_save_path = os.path.relpath(abs_save_path, dotfiles_root).replace(
         os.sep, posixpath.sep
@@ -150,8 +252,19 @@ def remove(path, config, dotfiles_root):
     if install_path is None:
         return OperationResult(config)
 
-    if os.path.islink(install_path):
-        os.unlink(install_path)
+    error = validate_remove_destination(config, rel_save_path, dotfiles_root, force)
+    if error:
+        raise ValueError(error)
+
+    if os.path.lexists(install_path):
+        if not os.path.islink(install_path) and not force:
+            raise ValueError(
+                f"{install_path} is not a managed link; refusing to overwrite it"
+            )
+        if os.path.islink(install_path) or os.path.isfile(install_path):
+            os.unlink(install_path)
+        else:
+            shutil.rmtree(install_path)
     del config["dotfiles"][rel_save_path][os_name()]
     if config["dotfiles"][rel_save_path]:
         if os.path.isfile(abs_save_path):
@@ -175,8 +288,13 @@ def install(abs_save_path, config, dotfiles_root, confirm_replace):
         )
         if get_path(config, rel_save_path) is None:
             return OperationResult(config, [f"{rel_save_path} is not kept in dotfiles"])
+    error = validate_install_sources(config, dotfiles_root, abs_save_path)
+    if error:
+        return OperationResult(config, [error])
 
-    messages = []
+    # Ask every destructive question before changing anything.  This avoids a
+    # partially-installed batch when a later replacement is declined.
+    candidates = []
     for item_rel_save_path in config["dotfiles"]:
         if rel_save_path is not None and item_rel_save_path != rel_save_path:
             continue
@@ -186,7 +304,15 @@ def install(abs_save_path, config, dotfiles_root, confirm_replace):
         item_abs_save_path = os.path.join(dotfiles_root, item_rel_save_path).replace(
             posixpath.sep, os.sep
         )
-        if _make_link(item_abs_save_path, item_install_path, confirm_replace):
+        candidates.append((item_rel_save_path, item_abs_save_path, item_install_path))
+    accepted = []
+    for item_rel_save_path, item_abs_save_path, item_install_path in candidates:
+        if not os.path.lexists(item_install_path) or confirm_replace(item_install_path):
+            accepted.append((item_rel_save_path, item_abs_save_path, item_install_path))
+    messages = []
+    for item_rel_save_path, item_abs_save_path, item_install_path in accepted:
+        # The preflight above already obtained consent; do not prompt again.
+        if _make_link(item_abs_save_path, item_install_path, lambda _: True):
             messages.append(f"Install {item_rel_save_path} -> {item_install_path}")
     return OperationResult(config, messages)
 
@@ -197,8 +323,15 @@ def share(abs_save_path, install_path, config, dotfiles_root, confirm_replace):
     )
     if rel_save_path not in config["dotfiles"]:
         return OperationResult(config, [f"{rel_save_path} is not kept in dotfiles"])
-    config = set_path(config, rel_save_path, install_path)
+    error = validate_saved_object(abs_save_path, dotfiles_root)
+    if error:
+        return OperationResult(config, [error])
+    error = validate_install_target(install_path, dotfiles_root)
+    if error:
+        return OperationResult(config, [error])
     messages = []
     if _make_link(abs_save_path, install_path, confirm_replace):
+        # Do not alter the mapping when the replacement was declined.
+        config = set_path(copy.deepcopy(config), rel_save_path, install_path)
         messages.append(f"share {rel_save_path} -> {install_path}")
     return OperationResult(config, messages)

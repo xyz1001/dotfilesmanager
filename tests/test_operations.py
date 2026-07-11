@@ -272,6 +272,7 @@ def test_share_handles_known_unknown_and_rejected_replacement(tmp_path, monkeypa
     install_path.parent.mkdir()
     install_path.write_text("existing")
     config = {"dotfiles": {"saved": {"darwin": {"path": "~/old"}}}}
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
     monkeypatch.setattr(operations, "os_name", lambda: "linux")
 
     unknown = operations.share(
@@ -284,7 +285,7 @@ def test_share_handles_known_unknown_and_rejected_replacement(tmp_path, monkeypa
     assert unknown.messages == ["unknown is not kept in dotfiles"]
     assert rejected.messages == []
     assert install_path.read_text() == "existing"
-    assert rejected.config["dotfiles"]["saved"]["linux"]["path"] == str(install_path)
+    assert "linux" not in rejected.config["dotfiles"]["saved"]
 
 
 def test_share_links_known_item_creates_parent_and_preserves_other_system(
@@ -296,6 +297,7 @@ def test_share_links_known_item_creates_parent_and_preserves_other_system(
     saved.write_text("saved")
     install_path = tmp_path / "home" / "nested" / "target"
     config = {"dotfiles": {"saved": {"darwin": {"path": "~/old"}}}}
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
     monkeypatch.setattr(operations, "os_name", lambda: "linux")
 
     result = operations.share(
@@ -306,7 +308,7 @@ def test_share_links_known_item_creates_parent_and_preserves_other_system(
     assert os.readlink(install_path) == str(saved)
     assert result.config["dotfiles"]["saved"] == {
         "darwin": {"path": "~/old"},
-        "linux": {"path": str(install_path)},
+        "linux": {"path": "~/nested/target"},
     }
     assert result.messages == [f"share saved -> {install_path}"]
 
@@ -419,3 +421,37 @@ def test_remove_is_silent_when_current_system_is_not_registered(tmp_path, monkey
     assert result.messages == []
     assert result.config == config
     assert saved.exists()
+
+
+def test_remove_refuses_to_overwrite_non_link_install_path(tmp_path, monkeypatch):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    saved = repo / "saved"
+    saved.write_text("saved")
+    install = tmp_path / "home" / "install"
+    install.parent.mkdir()
+    install.write_text("unmanaged")
+    monkeypatch.setattr(operations, "os_name", lambda: "linux")
+
+    with pytest.raises(ValueError, match="not a managed link"):
+        operations.remove(str(saved), _config("saved", install), str(repo))
+    assert install.read_text() == "unmanaged"
+    assert saved.read_text() == "saved"
+
+
+def test_config_only_validates_current_platform_install_paths(tmp_path, monkeypatch):
+    home = tmp_path / "home"
+    repo = home / "dotfiles"
+    home.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setattr(operations, "os_name", lambda: "linux")
+    config = {
+        "dotfiles": {
+            "saved": {
+                "linux": {"path": "~/ok"},
+                "darwin": {"path": "/Users/example/ok"},
+            }
+        }
+    }
+
+    assert operations.validate_config(config, str(repo)) == []

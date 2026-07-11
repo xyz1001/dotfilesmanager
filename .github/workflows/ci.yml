@@ -25,6 +25,8 @@ jobs:
         run: ruff check .
       - name: Check formatting
         run: ruff format --check .
+      - name: Run unit tests
+        run: python -m pytest
       - name: Verify command-line interface
         run: dfm --help
       - name: Build distribution
