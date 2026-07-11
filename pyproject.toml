@@ -26,9 +26,10 @@ dependencies = [
 Repository = "https://github.com/xyz1001/dotfilesmanager"
 
 [project.scripts]
-dfm = "dfm:main"
+dfm = "dotfilesmanager.cli:main"
 
 [tool.setuptools]
+packages = ["dotfilesmanager"]
 py-modules = ["dfm"]
 
 [project.optional-dependencies]
