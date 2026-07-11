@@ -5,6 +5,7 @@ exit codes. Callers provide confirmation callbacks and render operation results.
 """
 
 import hashlib
+import ntpath
 import os
 import platform
 import posixpath
@@ -59,21 +60,42 @@ def get_save_path(install_path, system, dotfiles_root):
     return os.path.join(dotfiles_root, save_dir, system_sep, filename)
 
 
+def _is_within(path, directory):
+    path_module = ntpath if os_name() == "windows" else os.path
+    path = path_module.normcase(path_module.abspath(path_module.normpath(path)))
+    directory = path_module.normcase(
+        path_module.abspath(path_module.normpath(directory))
+    )
+    try:
+        return path_module.commonpath((path, directory)) == directory
+    except ValueError:
+        return False
+
+
 def validate_add(install_path, system, dotfiles_root):
     if not os.path.isfile(install_path) and not os.path.isdir(install_path):
         return f"{install_path} is not valid file or directory"
-    if install_path.startswith(dotfiles_root):
+    if _is_within(install_path, dotfiles_root):
         return f"{install_path} cannot be in dotfiles"
-    if not install_path.startswith(str(os.path.expanduser("~"))):
+    if not _is_within(install_path, os.path.expanduser("~")):
         return f"{install_path} must be in home"
     if os.path.exists(get_save_path(install_path, system, dotfiles_root)):
         return f"{install_path} has been kept in dotfiles"
     return None
 
 
-def validate_remove(path, dotfiles_root):
+def _remove_save_path(path, dotfiles_root):
+    if _is_within(path, dotfiles_root):
+        return os.path.abspath(os.path.normpath(path))
     target_path = os.readlink(path) if os.path.islink(path) else path
-    if not target_path.startswith(dotfiles_root):
+    if not os.path.isabs(target_path):
+        target_path = os.path.join(os.path.dirname(path), target_path)
+    return os.path.abspath(os.path.normpath(target_path))
+
+
+def validate_remove(path, dotfiles_root):
+    target_path = _remove_save_path(path, dotfiles_root)
+    if not _is_within(target_path, dotfiles_root):
         return f"{path} is not in dotfiles"
     return None
 
@@ -120,7 +142,7 @@ def add(install_path, system, config, dotfiles_root):
 
 
 def remove(path, config, dotfiles_root):
-    abs_save_path = os.readlink(path) if os.path.islink(path) else path
+    abs_save_path = _remove_save_path(path, dotfiles_root)
     rel_save_path = os.path.relpath(abs_save_path, dotfiles_root).replace(
         os.sep, posixpath.sep
     )
