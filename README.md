@@ -35,6 +35,7 @@ dfm add <install_path> [--system] [--dry-run] [--force] [--backup]
 dfm rm <path> [--dry-run] [--force] [--backup]
 dfm install [<save_path>] [--dry-run] [--force] [--backup]
 dfm share <save_path> <install_path> [--dry-run] [--force] [--backup]
+dfm view [--dry-run] [--force] [--backup]
 dfm doctor [--repair]
 ```
 
@@ -42,6 +43,7 @@ dfm doctor [--repair]
 - `rm <path>`：移除已纳管项。可传入其安装路径（符号链接）或 `~/dotfiles` 中的保存路径；工具会移除链接并恢复文件。若该保存项仍被其他系统使用，会复制内容到当前安装路径。
 - `install [<save_path>]`：不带参数时，为当前系统配置的全部已纳管项创建符号链接；指定 `save_path` 时仅安装该保存项。
 - `share <save_path> <install_path>`：将 `~/dotfiles` 中已有的保存项关联到当前系统的另一个安装路径，并创建符号链接。
+- `view`：为当前系统已配置的项目生成 `~/dotfiles/view/<system>/home/` 下的可读相对符号链接视图。安装链接仍直接指向保存对象；视图是可再生的，已有视图目录需使用 `--force` 重建。
 
 `save_path` 是 `~/dotfiles` 中的保存路径，`install_path` 是配置的实际安装路径。路径可以使用 `~`。
 
@@ -70,6 +72,7 @@ dfm doctor [--repair]
 - 操作异常时，程序会尝试立即恢复；若恢复本身失败，日志和快照保持不变，可安全重试。恢复会拒绝日志中指向配置、锁、日志或备份目录的受保护路径，以及经符号链接父目录逃逸的路径。无效、缺失或不匹配的日志/清单会使恢复和后续变更失败（fail closed），不会据此删除用户路径。断电、磁盘/权限错误等情况下先运行 `dfm doctor`；仅在日志有效时使用 `dfm doctor --repair`。不要手动删除事务日志、快照或保留备份中的 `manifest.yaml`。
 - 提交和恢复在删除日志前会同步直接变更的文件、目录树及其父目录；文件或目录同步失败会中止提交/恢复并保留日志和快照，供后续恢复。目录打开或目录 `fsync` **仅**在明确报告不受平台支持（`EINVAL`、`ENOTSUP`/`EOPNOTSUPP`），或 Windows 上目录打开报告 `EACCES` 时跳过；其他打开或同步错误会传播并保留恢复状态。目录树中的符号链接（包括悬挂链接）不会被跟随或同步其目标，仍会同步链接所在父目录。这仍不能替代文件系统/硬件的持久性保证。快照仅覆盖事务列出的直接变更路径（`rm` 列出当前平台的配置安装路径）及配置文件；它不是整个家目录或仓库的长期备份。需要长期/跨机器恢复时请自行备份整个 `~/dotfiles`。
 - Windows 上运行 `dfm` 需要管理员权限，以便创建符号链接。
+- 如果 `~/dotfiles` 是 Git 仓库，请自行在该仓库的忽略规则中加入 `/view/`。`dfm view` 不会修改 `.gitignore`、`.git/info/exclude` 或任何 Git 忽略元数据。
 
 ## 发布到 PyPI
 

@@ -13,6 +13,7 @@ def _args(command, **values):
         "rm": False,
         "install": False,
         "share": False,
+        "view": False,
         "doctor": False,
         "--system": False,
         "--dry-run": False,
@@ -267,3 +268,114 @@ def test_force_rm_preserves_conflicting_destination_in_transaction(
     )
     assert install.read_text() == "managed"
     assert any((root / transaction.BACKUPS).iterdir())
+
+
+def test_view_dry_run_writes_nothing_and_force_rebuilds(tmp_path, monkeypatch):
+    home = tmp_path / "home"
+    root = home / "dotfiles"
+    home.mkdir()
+    saved = root / "saved"
+    saved.parent.mkdir()
+    saved.write_text("value")
+    config.save_config(
+        str(root), {"dotfiles": {"saved": {operations.os_name(): {"path": "~/item"}}}}
+    )
+    monkeypatch.setenv("HOME", str(home))
+
+    _run(monkeypatch, root, _args("view", **{"--dry-run": True}))
+    assert not (root / "view").exists()
+    _run(monkeypatch, root, _args("view"))
+    link = root / "view" / operations.os_name() / "home" / "item"
+    assert link.resolve() == saved
+    with pytest.raises(SystemExit):
+        _run(monkeypatch, root, _args("view", **{"--force": False}))
+    _run(monkeypatch, root, _args("view", **{"--force": True}))
+    assert link.resolve() == saved
+    assert not (root / transaction.JOURNAL).exists()
+
+
+def test_view_force_dry_run_preserves_existing_tree_and_yaml(tmp_path, monkeypatch):
+    home = tmp_path / "home"
+    root = home / "dotfiles"
+    home.mkdir()
+    saved = root / "saved"
+    saved.parent.mkdir()
+    saved.write_text("value")
+    old_view = root / "view"
+    old_view.mkdir()
+    (old_view / "keep").write_text("old")
+    config.save_config(
+        str(root), {"dotfiles": {"saved": {operations.os_name(): {"path": "~/item"}}}}
+    )
+    config_bytes = (root / "dfm.yaml").read_bytes()
+    monkeypatch.setenv("HOME", str(home))
+
+    _run(monkeypatch, root, _args("view", **{"--dry-run": True, "--force": True}))
+
+    assert (old_view / "keep").read_text() == "old"
+    assert (root / "dfm.yaml").read_bytes() == config_bytes
+    assert not (root / transaction.JOURNAL).exists()
+
+
+def test_view_failure_rolls_back_force_rebuild(tmp_path, monkeypatch):
+    home = tmp_path / "home"
+    root = home / "dotfiles"
+    home.mkdir()
+    saved = root / "saved"
+    saved.parent.mkdir()
+    saved.write_text("value")
+    old_view = root / "view"
+    old_view.mkdir()
+    (old_view / "keep").write_text("old")
+    config.save_config(
+        str(root), {"dotfiles": {"saved": {operations.os_name(): {"path": "~/item"}}}}
+    )
+    monkeypatch.setenv("HOME", str(home))
+
+    monkeypatch.setattr(
+        operations.os,
+        "symlink",
+        lambda *_, **__: (_ for _ in ()).throw(OSError("boom")),
+    )
+    with pytest.raises(OSError, match="boom"):
+        _run(monkeypatch, root, _args("view", **{"--force": True}))
+
+    assert (old_view / "keep").read_text() == "old"
+    assert not (root / transaction.JOURNAL).exists()
+
+
+def test_view_first_build_failure_rolls_back_absent_root(tmp_path, monkeypatch):
+    home = tmp_path / "home"
+    root = home / "dotfiles"
+    home.mkdir()
+    saved = root / "saved"
+    saved.parent.mkdir()
+    saved.write_text("value")
+    config.save_config(
+        str(root), {"dotfiles": {"saved": {operations.os_name(): {"path": "~/item"}}}}
+    )
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setattr(
+        operations.os,
+        "symlink",
+        lambda *_, **__: (_ for _ in ()).throw(OSError("boom")),
+    )
+
+    with pytest.raises(OSError, match="boom"):
+        _run(monkeypatch, root, _args("view"))
+
+    assert not (root / "view").exists()
+    assert not (root / transaction.JOURNAL).exists()
+
+
+def test_doctor_ignores_generated_view_namespace(tmp_path, monkeypatch):
+    home = tmp_path / "home"
+    root = home / "dotfiles"
+    home.mkdir()
+    root.mkdir()
+    (root / "view" / "linux").mkdir(parents=True)
+    (root / "view" / "linux" / "untracked").write_text("generated")
+    config.save_config(str(root), {"dotfiles": {}})
+    monkeypatch.setenv("HOME", str(home))
+
+    _run(monkeypatch, root, _args("doctor"))

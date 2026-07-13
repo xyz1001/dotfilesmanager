@@ -17,6 +17,7 @@ Usage:
     dfm rm <path> [--dry-run] [--force] [--backup]
     dfm install [<save_path>] [--dry-run] [--force] [--backup]
     dfm share <save_path> <install_path> [--dry-run] [--force] [--backup]
+    dfm view [--dry-run] [--force] [--backup]
     dfm doctor [--repair]
 
 Options:
@@ -69,6 +70,8 @@ def _mutation_paths(command, args, dotfiles_config, root):
         return paths
     if command == "share":
         return [operations.normalize_path(args["<install_path>"])]
+    if command == "view":
+        return [os.path.join(root, operations.VIEW_DIRECTORY)]
     paths = []
     selected = operations.normalize_path(args.get("<save_path>"))
     for rel_path in dotfiles_config["dotfiles"]:
@@ -202,7 +205,9 @@ def main():
     if args.get("doctor"):
         _doctor(root, args.get("--repair", False))
         return
-    command = next(name for name in ("add", "rm", "install", "share") if args.get(name))
+    command = next(
+        name for name in ("add", "rm", "install", "share", "view") if args.get(name)
+    )
     dry_run = args.get("--dry-run", False)
     if dry_run:
         # Validation is deliberately done below; no lock is taken because even
@@ -211,6 +216,16 @@ def main():
         errors = operations.validate_config(dotfiles_config, root)
         if errors:
             _fail(errors[0])
+        if command == "view":
+            try:
+                operations.plan_view(dotfiles_config, root)
+            except ValueError as error:
+                _fail(str(error))
+            error = operations.validate_view_root(root, args.get("--force", False))
+            if error:
+                _fail(error)
+            print(f"Dry-run: {command}; no changes made")
+            return
         if command == "add":
             install = operations.normalize_path(args["<install_path>"])
             error = operations.validate_add(install, args.get("--system", False), root)
@@ -259,6 +274,14 @@ def main():
         errors = operations.validate_config(dotfiles_config, root)
         if errors:
             _fail(errors[0])
+        if command == "view":
+            try:
+                operations.plan_view(dotfiles_config, root)
+            except ValueError as error:
+                _fail(str(error))
+            error = operations.validate_view_root(root, args.get("--force", False))
+            if error:
+                _fail(error)
         original_config = copy.deepcopy(dotfiles_config)
         share_preconfirmed = False
         if command == "add":
@@ -336,7 +359,7 @@ def main():
                     root,
                     confirm,
                 )
-            else:
+            elif command == "share":
                 result = operations.share(
                     operations.normalize_path(args["<save_path>"]),
                     operations.normalize_path(args["<install_path>"]),
@@ -344,7 +367,13 @@ def main():
                     root,
                     confirm,
                 )
-            if command != "share" or result.config != original_config:
+            else:
+                result = operations.view(
+                    dotfiles_config, root, args.get("--force", False)
+                )
+            if command != "view" and (
+                command != "share" or result.config != original_config
+            ):
                 config.save_config(root, result.config)
             tx.commit()
         except Exception:

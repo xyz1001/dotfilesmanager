@@ -40,7 +40,7 @@ def no_real_transactions(monkeypatch):
 
 
 def _args(command, **values):
-    args = {"add": False, "rm": False, "install": False, "share": False}
+    args = {"add": False, "rm": False, "install": False, "share": False, "view": False}
     args[command] = True
     args.update(values)
     return args
@@ -200,3 +200,23 @@ def test_main_blocks_non_administrator_on_windows(monkeypatch, capsys):
 
     assert "Administrator priviledges" in capsys.readouterr().out
     parse.assert_not_called()
+
+
+def test_view_dispatches_without_saving_configuration(monkeypatch):
+    result = operations.OperationResult({"dotfiles": {"changed": {}}}, ["viewed"])
+    monkeypatch.setattr(cli.operations, "os_name", lambda: "linux")
+    monkeypatch.setattr(cli, "docopt", Mock(return_value=_args("view")))
+    monkeypatch.setattr(cli.config, "default_dotfiles_root", Mock(return_value="/repo"))
+    dotfiles_config = {"dotfiles": {}}
+    monkeypatch.setattr(cli.config, "load_config", Mock(return_value=dotfiles_config))
+    monkeypatch.setattr(cli.operations, "plan_view", Mock(return_value=[]))
+    monkeypatch.setattr(cli.operations, "validate_view_root", Mock(return_value=None))
+    view = Mock(return_value=result)
+    monkeypatch.setattr(cli.operations, "view", view)
+    save = Mock()
+    monkeypatch.setattr(cli.config, "save_config", save)
+
+    cli.main()
+
+    view.assert_called_once_with(dotfiles_config, "/repo", False)
+    save.assert_not_called()

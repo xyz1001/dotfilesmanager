@@ -455,3 +455,155 @@ def test_config_only_validates_current_platform_install_paths(tmp_path, monkeypa
     }
 
     assert operations.validate_config(config, str(repo)) == []
+
+
+def test_view_plan_uses_readable_current_platform_relative_links(tmp_path, monkeypatch):
+    home = tmp_path / "home"
+    repo = home / "dotfiles"
+    saved = repo / "objects" / "item"
+    saved.parent.mkdir(parents=True)
+    saved.write_text("value")
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setattr(operations, "os_name", lambda: "linux")
+    config = {
+        "dotfiles": {
+            "objects/item": {"linux": {"path": "~/.config/app/item"}},
+            "foreign": {"darwin": {"path": "~/Library/item"}},
+        }
+    }
+
+    result = operations.view(config, str(repo))
+    link = repo / "view" / "linux" / "home" / ".config" / "app" / "item"
+    assert link.is_symlink()
+    assert os.readlink(link) == os.path.relpath(saved, link.parent)
+    assert link.resolve() == saved
+    assert result.config is config
+
+
+def test_view_preserves_canonical_saved_symlink_and_directory_type(
+    tmp_path, monkeypatch
+):
+    home = tmp_path / "home"
+    repo = home / "dotfiles"
+    target = repo / "objects" / "directory"
+    target.mkdir(parents=True)
+    saved = repo / "canonical-directory"
+    saved.symlink_to(target, target_is_directory=True)
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setattr(operations, "os_name", lambda: "linux")
+    config = _config("canonical-directory", "~/item")
+
+    entry = operations.plan_view(config, str(repo))[0]
+    operations.view(config, str(repo))
+    link = repo / "view" / "linux" / "home" / "item"
+
+    assert entry.target == str(saved)
+    assert entry.is_directory is True
+    assert os.readlink(link) == os.path.relpath(saved, link.parent)
+
+
+def test_view_passes_directory_flag_to_symlink(tmp_path, monkeypatch):
+    home = tmp_path / "home"
+    repo = home / "dotfiles"
+    saved = repo / "directory"
+    saved.mkdir(parents=True)
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setattr(operations, "os_name", lambda: "windows")
+    symlink = pytest.MonkeyPatch()
+    calls = []
+    symlink.setattr(
+        operations.os, "symlink", lambda *args, **kwargs: calls.append((args, kwargs))
+    )
+    try:
+        operations.view(_config("directory", "~/item", "windows"), str(repo))
+    finally:
+        symlink.undo()
+
+    assert calls[0][1]["target_is_directory"] is True
+
+
+@pytest.mark.parametrize("rel_path", ["view/item", "view", "view/../saved"])
+def test_view_namespace_is_rejected_as_configured_saved_path(tmp_path, rel_path):
+    assert operations.validate_config(
+        {"dotfiles": {rel_path: {}}}, str(tmp_path / "repo")
+    ) == ["view is reserved and cannot be a saved path"]
+
+
+def test_view_namespace_keeps_posix_key_backslashes_as_filenames(tmp_path):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    key = "view\\filename"
+    (repo / key).write_text("file")
+
+    assert operations.validate_config({"dotfiles": {key: {}}}, str(repo)) == []
+
+
+def test_view_rejects_saved_alias_into_view_and_missing_source(tmp_path, monkeypatch):
+    home = tmp_path / "home"
+    repo = home / "dotfiles"
+    generated = repo / "view" / "item"
+    generated.parent.mkdir(parents=True)
+    generated.write_text("generated")
+    (repo / "alias").symlink_to(generated)
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setattr(operations, "os_name", lambda: "linux")
+
+    assert operations.validate_config(_config("alias", "~/item"), str(repo)) == [
+        "view is reserved and cannot be a saved path"
+    ]
+    assert operations.validate_config(
+        _config("alias/missing", "~/item"), str(repo)
+    ) == ["view is reserved and cannot be a saved path"]
+    with pytest.raises(ValueError, match="reserved view"):
+        operations.plan_view(_config("alias", "~/item"), str(repo))
+    with pytest.raises(ValueError, match="supported saved"):
+        operations.plan_view(_config("missing", "~/item"), str(repo))
+
+
+def test_view_rejects_home_conflicts_and_unsafe_sources(tmp_path, monkeypatch):
+    home = tmp_path / "home"
+    repo = home / "dotfiles"
+    repo.mkdir(parents=True)
+    (repo / "one").write_text("one")
+    (repo / "two").write_text("two")
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setattr(operations, "os_name", lambda: "linux")
+    with pytest.raises(ValueError, match="home itself"):
+        operations.plan_view(_config("one", "~"), str(repo))
+    with pytest.raises(ValueError, match="duplicate or overlap"):
+        operations.plan_view(
+            {
+                "dotfiles": {
+                    "one": {"linux": {"path": "~/.config"}},
+                    "two": {"linux": {"path": "~/.config/app"}},
+                }
+            },
+            str(repo),
+        )
+    (repo / ".git").mkdir()
+    (repo / ".git" / "object").write_text("bad")
+    with pytest.raises(ValueError, match="safe canonical"):
+        operations.plan_view(_config(".git/object", "~/item"), str(repo))
+    outside = tmp_path / "outside"
+    outside.write_text("bad")
+    (repo / "outside-link").symlink_to(outside)
+    with pytest.raises(ValueError, match="safe canonical"):
+        operations.plan_view(_config("outside-link", "~/item"), str(repo))
+
+
+def test_view_root_requires_force_and_rejects_non_directories(tmp_path):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    view = repo / "view"
+    view.mkdir()
+    assert "use --force" in operations.validate_view_root(str(repo))
+    assert operations.validate_view_root(str(repo), True) is None
+    view.rmdir()
+    view.write_text("bad")
+    assert "real directory" in operations.validate_view_root(str(repo), True)
+    view.unlink()
+    view.symlink_to(repo / "elsewhere")
+    assert "real directory" in operations.validate_view_root(str(repo), True)
+    view.unlink()
+    os.mkfifo(view)
+    assert "real directory" in operations.validate_view_root(str(repo), True)
