@@ -134,3 +134,7 @@ tags
 
 # End of https://www.gitignore.io/api/python,vim
 n
+
+# Local OpenCode deepwork state
+.slim/deepwork/
+.ignore
