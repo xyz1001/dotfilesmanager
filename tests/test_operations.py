@@ -27,6 +27,33 @@ def test_get_save_path_hashes_shrunk_parent_and_optional_system(tmp_path, monkey
     ) == str(tmp_path / "repo" / digest / "linux" / "app")
 
 
+def test_get_save_path_canonicalizes_windows_home_relative_parent(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setattr(operations, "os_name", lambda: "windows")
+    monkeypatch.setattr(
+        operations,
+        "expanduser",
+        lambda path: r"C:\Users\Alice" if path == "~" else path,
+    )
+
+    tui_path = r"C:\Users\Alice\.config\opencode\tui.json"
+    config_path = r"c:/users/alice/.config/opencode/opencode.json"
+    tilde_path = r"~/.config/OPENCODE/settings.json"
+    tui_save_path = operations.get_save_path(tui_path, False, str(tmp_path / "repo"))
+    config_save_path = operations.get_save_path(
+        config_path, False, str(tmp_path / "repo")
+    )
+    tilde_save_path = operations.get_save_path(
+        tilde_path, False, str(tmp_path / "repo")
+    )
+
+    digest = hashlib.md5(rb"~\.config\opencode").hexdigest()
+    assert os.path.dirname(tui_save_path) == os.path.dirname(config_save_path)
+    assert os.path.dirname(tui_save_path) == os.path.dirname(tilde_save_path)
+    assert os.path.dirname(tui_save_path) == str(tmp_path / "repo" / digest)
+
+
 def test_validate_add_rejects_outside_repository_and_duplicate(tmp_path, monkeypatch):
     home = tmp_path / "home"
     home.mkdir()

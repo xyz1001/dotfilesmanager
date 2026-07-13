@@ -75,9 +75,34 @@ def shrinkuser(path):
 
 
 def get_save_path(install_path, system, dotfiles_root):
-    install_path = shrinkuser(install_path)
-    save_dir = hashlib.md5(os.path.dirname(install_path).encode("utf8")).hexdigest()
-    filename = os.path.basename(install_path)
+    if os_name() == "windows":
+        path_module = ntpath
+        home = path_module.normcase(path_module.normpath(expanduser("~")))
+        install_path = str(install_path)
+        if install_path.startswith("~"):
+            install_path = install_path.replace("~", home, 1)
+        install_path = path_module.normcase(path_module.normpath(install_path))
+        parent = path_module.dirname(install_path)
+        try:
+            relative_parent = path_module.relpath(parent, home)
+        except ValueError:
+            # Paths on another drive cannot be represented relative to home.
+            hash_path = parent
+        else:
+            if relative_parent == ".." or relative_parent.startswith(
+                ".." + path_module.sep
+            ):
+                hash_path = parent
+            elif relative_parent == ".":
+                hash_path = "~"
+            else:
+                hash_path = path_module.join("~", relative_parent)
+        filename = path_module.basename(install_path)
+    else:
+        install_path = shrinkuser(install_path)
+        hash_path = os.path.dirname(install_path)
+        filename = os.path.basename(install_path)
+    save_dir = hashlib.md5(hash_path.encode("utf8")).hexdigest()
     system_sep = os_name() if system else ""
     return os.path.join(dotfiles_root, save_dir, system_sep, filename)
 
