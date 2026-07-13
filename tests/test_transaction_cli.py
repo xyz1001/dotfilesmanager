@@ -1,6 +1,7 @@
 """End-to-end transaction coverage for each filesystem mutator."""
 
 import os
+from unittest.mock import Mock
 
 import pytest
 
@@ -16,8 +17,10 @@ def _args(command, **values):
         "view": False,
         "doctor": False,
         "--system": False,
+        "--non-interactive": False,
+        "--target": [],
         "--dry-run": False,
-        "--force": True,
+        "--force": False,
         "--backup": False,
         "--repair": False,
         "<install_path>": None,
@@ -43,7 +46,11 @@ def test_add_then_rm_are_committed_without_pending_journal(tmp_path, monkeypatch
     item.write_text("value")
     monkeypatch.setenv("HOME", str(home))
 
-    _run(monkeypatch, root, _args("add", **{"<install_path>": str(item)}))
+    _run(
+        monkeypatch,
+        root,
+        _args("add", **{"<install_path>": str(item), "--non-interactive": True}),
+    )
     assert item.is_symlink()
     assert not (root / ".dfm-transaction.yaml").exists()
     _run(monkeypatch, root, _args("rm", **{"<path>": str(item)}))
@@ -68,7 +75,14 @@ def test_share_and_install_commit_as_transactions(tmp_path, monkeypatch):
     _run(
         monkeypatch,
         root,
-        _args("share", **{"<save_path>": str(saved), "<install_path>": str(target)}),
+        _args(
+            "share",
+            **{
+                "<save_path>": str(saved),
+                "<install_path>": str(target),
+                "--non-interactive": True,
+            },
+        ),
     )
     assert target.is_symlink()
     target.unlink()
@@ -81,6 +95,279 @@ def test_share_and_install_commit_as_transactions(tmp_path, monkeypatch):
     assert (
         config.load_config(str(root))["dotfiles"]["saved"][system]["path"] == "~/shared"
     )
+
+
+def test_noninteractive_add_persists_multiple_targets_without_stdin(
+    tmp_path, monkeypatch
+):
+    home = tmp_path / "home"
+    root = home / "dotfiles"
+    item = home / "item"
+    home.mkdir()
+    item.write_text("value")
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setattr(
+        "builtins.input", lambda _: (_ for _ in ()).throw(AssertionError)
+    )
+    adapter = Mock(side_effect=AssertionError("wizard must not run"))
+    monkeypatch.setattr(cli, "_prompt_targets", adapter)
+
+    _run(
+        monkeypatch,
+        root,
+        _args(
+            "add",
+            **{
+                "<install_path>": str(item),
+                "--non-interactive": True,
+                "--target": ["darwin=~/Library/item", "windows=~/AppData/item"],
+            },
+        ),
+    )
+
+    rel = os.path.relpath(item.resolve(), root).replace(os.sep, "/")
+    systems = config.load_config(str(root))["dotfiles"][rel]
+    assert systems["darwin"]["path"] == "~/Library/item"
+    assert systems["windows"]["path"] == "~/AppData/item"
+    adapter.assert_not_called()
+
+
+def test_add_rolls_back_when_config_save_fails(tmp_path, monkeypatch):
+    home = tmp_path / "home"
+    root = home / "dotfiles"
+    item = home / "item"
+    home.mkdir()
+    item.write_text("value")
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setattr(
+        cli.config, "save_config", lambda *_: (_ for _ in ()).throw(OSError("boom"))
+    )
+
+    with pytest.raises(OSError, match="boom"):
+        _run(
+            monkeypatch,
+            root,
+            _args("add", **{"<install_path>": str(item), "--non-interactive": True}),
+        )
+
+    assert item.read_text() == "value"
+    assert not item.is_symlink()
+    assert not (root / transaction.JOURNAL).exists()
+
+
+def test_noninteractive_share_persists_target_without_reading_stdin(
+    tmp_path, monkeypatch
+):
+    home = tmp_path / "home"
+    root = home / "dotfiles"
+    saved = root / "saved"
+    target = home / "target"
+    home.mkdir()
+    root.mkdir()
+    saved.write_text("value")
+    config.save_config(str(root), {"dotfiles": {"saved": {}}})
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setattr(
+        "builtins.input", lambda _: (_ for _ in ()).throw(AssertionError("no stdin"))
+    )
+    adapter = Mock(side_effect=AssertionError("wizard must not run"))
+    monkeypatch.setattr(cli, "_prompt_targets", adapter)
+
+    _run(
+        monkeypatch,
+        root,
+        _args(
+            "share",
+            **{
+                "<save_path>": str(saved),
+                "<install_path>": str(target),
+                "--non-interactive": True,
+                "--target": ["darwin=~/Library/target"],
+            },
+        ),
+    )
+
+    assert target.is_symlink()
+    systems = config.load_config(str(root))["dotfiles"]["saved"]
+    assert systems[operations.os_name()]["path"] == "~/target"
+    assert systems["darwin"]["path"] == "~/Library/target"
+    adapter.assert_not_called()
+
+
+def test_share_rolls_back_link_when_config_save_fails(tmp_path, monkeypatch):
+    home = tmp_path / "home"
+    root = home / "dotfiles"
+    saved = root / "saved"
+    target = home / "target"
+    home.mkdir()
+    root.mkdir()
+    saved.write_text("value")
+    config.save_config(str(root), {"dotfiles": {"saved": {}}})
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setattr(
+        cli.config, "save_config", lambda *_: (_ for _ in ()).throw(OSError("boom"))
+    )
+
+    with pytest.raises(OSError, match="boom"):
+        _run(
+            monkeypatch,
+            root,
+            _args(
+                "share",
+                **{
+                    "<save_path>": str(saved),
+                    "<install_path>": str(target),
+                    "--non-interactive": True,
+                },
+            ),
+        )
+
+    assert not os.path.lexists(target)
+    assert config.load_config(str(root)) == {"dotfiles": {"saved": {}}}
+    assert not (root / transaction.JOURNAL).exists()
+
+
+def test_share_state_change_after_preflight_rolls_back_without_input(
+    tmp_path, monkeypatch
+):
+    home = tmp_path / "home"
+    root = home / "dotfiles"
+    saved = root / "saved"
+    target = home / "target"
+    home.mkdir()
+    root.mkdir()
+    saved.write_text("value")
+    config.save_config(str(root), {"dotfiles": {"saved": {}}})
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setattr(
+        "builtins.input", lambda _: (_ for _ in ()).throw(AssertionError)
+    )
+    real_share = operations.share
+
+    def changed_share(*args, **kwargs):
+        target.write_text("race")
+        return real_share(*args, **kwargs)
+
+    monkeypatch.setattr(cli.operations, "share", changed_share)
+    with pytest.raises(ValueError, match="changed after share preflight"):
+        _run(
+            monkeypatch,
+            root,
+            _args(
+                "share",
+                **{
+                    "<save_path>": str(saved),
+                    "<install_path>": str(target),
+                    "--non-interactive": True,
+                },
+            ),
+        )
+    assert not os.path.lexists(target)
+    assert not (root / transaction.JOURNAL).exists()
+
+
+def test_install_state_change_after_preflight_rolls_back_without_input(
+    tmp_path, monkeypatch
+):
+    home = tmp_path / "home"
+    root = home / "dotfiles"
+    saved = root / "saved"
+    target = home / "target"
+    home.mkdir()
+    root.mkdir()
+    saved.write_text("value")
+    config.save_config(
+        str(root), {"dotfiles": {"saved": {operations.os_name(): {"path": "~/target"}}}}
+    )
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setattr(
+        "builtins.input", lambda _: (_ for _ in ()).throw(AssertionError)
+    )
+    real_install = operations.install
+
+    def changed_install(*args, **kwargs):
+        target.write_text("race")
+        return real_install(*args, **kwargs)
+
+    monkeypatch.setattr(cli.operations, "install", changed_install)
+    with pytest.raises(ValueError, match="changed after install preflight"):
+        _run(monkeypatch, root, _args("install", **{"<save_path>": str(saved)}))
+    assert not os.path.lexists(target)
+    assert not (root / transaction.JOURNAL).exists()
+
+
+def test_share_relative_correct_link_registers_only_and_platform_specific_bypasses_wizard(
+    tmp_path, monkeypatch
+):
+    home = tmp_path / "home"
+    root = home / "dotfiles"
+    saved = root / "saved"
+    target = home / "target"
+    home.mkdir()
+    root.mkdir()
+    saved.write_text("value")
+    target.symlink_to("dotfiles/saved")
+    config.save_config(str(root), {"dotfiles": {"saved": {}}})
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setattr(
+        "builtins.input", lambda _: (_ for _ in ()).throw(AssertionError)
+    )
+    _run(
+        monkeypatch,
+        root,
+        _args(
+            "share",
+            **{
+                "<save_path>": str(saved),
+                "<install_path>": str(target),
+                "--non-interactive": True,
+            },
+        ),
+    )
+    assert os.readlink(target) == "dotfiles/saved"
+    assert (
+        config.load_config(str(root))["dotfiles"]["saved"][operations.os_name()]["path"]
+        == "~/target"
+    )
+
+    rel = "a" * 32 + f"/{operations.os_name()}/item"
+    platform_saved = root / rel
+    platform_saved.parent.mkdir(parents=True)
+    platform_saved.write_text("platform")
+    platform_target = home / "platform-target"
+    config.save_config(str(root), {"dotfiles": {rel: {}}})
+    monkeypatch.setattr(cli.sys, "stdin", type("TTY", (), {"isatty": lambda _: True})())
+    _run(
+        monkeypatch,
+        root,
+        _args(
+            "share",
+            **{
+                "<save_path>": str(platform_saved),
+                "<install_path>": str(platform_target),
+            },
+        ),
+    )
+    assert platform_target.is_symlink()
+
+
+def test_interactive_wizard_final_rejection_is_true_noop(tmp_path, monkeypatch):
+    home = tmp_path / "home"
+    root = home / "dotfiles"
+    item = home / "item"
+    home.mkdir()
+    item.write_text("value")
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setattr(cli.sys, "stdin", type("TTY", (), {"isatty": lambda _: True})())
+    answers = iter([{"systems": ["darwin"]}, {"path": "~/item"}, {"confirm": False}])
+    monkeypatch.setattr(cli, "_prompt_targets", lambda _: next(answers))
+
+    with pytest.raises(SystemExit):
+        _run(monkeypatch, root, _args("add", **{"<install_path>": str(item)}))
+
+    assert item.read_text() == "value"
+    assert not (root / "dfm.yaml").exists()
+    assert not (root / transaction.JOURNAL).exists()
 
 
 def test_dry_run_does_not_create_root_or_transaction_files(
@@ -96,7 +383,14 @@ def test_dry_run_does_not_create_root_or_transaction_files(
     _run(
         monkeypatch,
         root,
-        _args("add", **{"<install_path>": str(item), "--dry-run": True}),
+        _args(
+            "add",
+            **{
+                "<install_path>": str(item),
+                "--dry-run": True,
+                "--non-interactive": True,
+            },
+        ),
     )
     assert not root.exists()
     assert item.read_text() == "value"

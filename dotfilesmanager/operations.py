@@ -11,6 +11,7 @@ import os
 import platform
 import posixpath
 import shutil
+import sys
 from dataclasses import dataclass, field
 from stat import S_ISDIR
 
@@ -24,6 +25,7 @@ class OperationResult:
 
 
 VIEW_DIRECTORY = "view"
+SUPPORTED_SYSTEMS = ("linux", "darwin", "windows", "android")
 _VIEW_EXCLUDED = (
     VIEW_DIRECTORY,
     ".dfm-transaction.yaml",
@@ -44,7 +46,20 @@ class ViewEntry:
 
 
 def os_name():
-    return platform.system().lower()
+    """Return the YAML platform key, recognizing Android before Linux."""
+    get_api_level = getattr(sys, "getandroidapilevel", None)
+    if get_api_level is not None:
+        try:
+            api_level = get_api_level()
+        except Exception:
+            pass
+        else:
+            if isinstance(api_level, int):
+                return "android"
+    if os.environ.get("ANDROID_ROOT") and os.environ.get("ANDROID_DATA"):
+        return "android"
+    system = platform.system().lower()
+    return "android" if system == "android" else system
 
 
 def expanduser(path):
@@ -311,6 +326,134 @@ def validate_install_target(path, dotfiles_root):
     return None
 
 
+def parse_target_mappings(values, current_system=None):
+    """Parse repeated SYSTEM=~/path options without consulting the local OS."""
+    current_system = current_system or os_name()
+    targets = {}
+    for value in values or ():
+        if not isinstance(value, str) or "=" not in value:
+            raise ValueError("target must be SYSTEM=PATH")
+        system, path = value.split("=", 1)
+        if system not in SUPPORTED_SYSTEMS:
+            raise ValueError(f"unsupported target system: {system}")
+        if system == current_system:
+            raise ValueError("current platform cannot be a target")
+        if system in targets:
+            raise ValueError(f"duplicate target system: {system}")
+        error = validate_foreign_target(system, path)
+        if error:
+            raise ValueError(error)
+        targets[system] = path
+    return targets
+
+
+def validate_foreign_target(system, path):
+    """Lexically validate a portable, home-relative foreign install path."""
+    if system not in SUPPORTED_SYSTEMS:
+        return f"unsupported target system: {system}"
+    if not isinstance(path, str) or not path or "\x00" in path:
+        return "target path must be a non-empty ~/ path"
+    if "\\" in path:
+        return "target path must use / separators"
+    module = ntpath if system == "windows" else posixpath
+    if not path.startswith("~/") or path == "~":
+        return "target path must be below ~"
+    tail = path[2:]
+    if (
+        module.isabs(tail)
+        or module.splitdrive(tail)[0]
+        or any(part in ("", ".", "..") for part in tail.split("/"))
+    ):
+        return "target path must be a safe path below ~"
+    if system == "windows":
+        in_dotfiles = path.casefold() == "~/dotfiles" or path.casefold().startswith(
+            "~/dotfiles/"
+        )
+    else:
+        in_dotfiles = path == "~/dotfiles" or path.startswith("~/dotfiles/")
+    if in_dotfiles:
+        return "target path cannot be in ~/dotfiles"
+    return None
+
+
+def is_platform_specific_save_path(rel_save_path):
+    """Recognize only the canonical <md5>/<platform>/<basename> namespace."""
+    if not isinstance(rel_save_path, str):
+        return False
+    parts = rel_save_path.split("/")
+    return (
+        len(parts) == 3
+        and len(parts[0]) == 32
+        and all(character in "0123456789abcdef" for character in parts[0])
+        and parts[1] in SUPPORTED_SYSTEMS
+        and bool(parts[2])
+    )
+
+
+def merge_targets(config, rel_save_path, targets):
+    """Return a copy with compatible foreign mappings added, never replaced."""
+    if is_platform_specific_save_path(rel_save_path) and targets:
+        raise ValueError("platform-specific saved objects cannot have external targets")
+    merged = copy.deepcopy(config)
+    systems = merged["dotfiles"].setdefault(rel_save_path, {})
+    for system, path in targets.items():
+        error = validate_foreign_target(system, path)
+        if error:
+            raise ValueError(error)
+        existing = systems.get(system)
+        if existing is not None:
+            if not target_paths_equal(system, existing.get("path"), path):
+                raise ValueError(f"conflicting target mapping for {system}")
+            continue
+        systems[system] = {"path": path}
+    return merged
+
+
+def target_paths_equal(system, first, second):
+    """Compare target data in its target platform's path semantics."""
+    if not isinstance(first, str) or not isinstance(second, str):
+        return False
+    if system == "windows":
+        return ntpath.normcase(
+            ntpath.normpath(first.replace("/", "\\"))
+        ) == ntpath.normcase(ntpath.normpath(second.replace("/", "\\")))
+    return posixpath.normpath(first) == posixpath.normpath(second)
+
+
+def _wizard_source_path(install_path):
+    """Return a POSIX home-relative source even when it originated on Windows."""
+    if os_name() != "windows":
+        return shrinkuser(install_path)
+    home = ntpath.normcase(ntpath.normpath(expanduser("~")))
+    source = ntpath.normcase(ntpath.normpath(str(install_path)))
+    try:
+        relative = ntpath.relpath(source, home)
+    except ValueError:
+        return str(install_path).replace("\\", "/")
+    if relative != ".." and not relative.startswith(".." + ntpath.sep):
+        return "~/" + relative.replace("\\", "/")
+    return str(install_path).replace("\\", "/")
+
+
+def target_candidates(install_path, system):
+    """Pure candidate labels and paths for the line-oriented CLI wizard."""
+    source = _wizard_source_path(install_path)
+    result = [("same home-relative path", source)]
+    parts = source.split("/")
+    if len(parts) >= 3 and parts[:2] == ["~", ".config"]:
+        suffix = "/".join(parts[2:])
+        if system == "windows":
+            result.append(("Windows AppData convention", "~/AppData/Roaming/" + suffix))
+        elif system == "darwin":
+            result.append(
+                (
+                    "macOS Application Support convention",
+                    "~/Library/Application Support/" + suffix,
+                )
+            )
+    return result
+
+
 def validate_saved_object(path, dotfiles_root):
     error = validate_save_path(path, dotfiles_root)
     if error:
@@ -391,7 +534,7 @@ def _make_link(target, link, confirm_replace):
     return True
 
 
-def add(install_path, system, config, dotfiles_root):
+def add(install_path, system, config, dotfiles_root, targets=None):
     abs_save_path = get_save_path(install_path, system, dotfiles_root)
     os.makedirs(os.path.dirname(abs_save_path), exist_ok=True)
     shutil.move(install_path, abs_save_path)
@@ -399,8 +542,10 @@ def add(install_path, system, config, dotfiles_root):
     rel_save_path = os.path.relpath(abs_save_path, dotfiles_root).replace(
         os.sep, posixpath.sep
     )
+    updated = set_path(copy.deepcopy(config), rel_save_path, install_path)
+    updated = merge_targets(updated, rel_save_path, targets or {})
     return OperationResult(
-        set_path(config, rel_save_path, install_path),
+        updated,
         [f"Add {install_path} to {rel_save_path}"],
     )
 
@@ -442,7 +587,7 @@ def remove(path, config, dotfiles_root, force=False):
     return OperationResult(config, [f"Remove {rel_save_path}"])
 
 
-def install(abs_save_path, config, dotfiles_root, confirm_replace):
+def install(abs_save_path, config, dotfiles_root, confirm_replace, accepted=None):
     rel_save_path = None
     if abs_save_path is not None:
         rel_save_path = os.path.relpath(abs_save_path, dotfiles_root).replace(
@@ -467,19 +612,77 @@ def install(abs_save_path, config, dotfiles_root, confirm_replace):
             posixpath.sep, os.sep
         )
         candidates.append((item_rel_save_path, item_abs_save_path, item_install_path))
-    accepted = []
+    approved = []
     for item_rel_save_path, item_abs_save_path, item_install_path in candidates:
+        if accepted is not None and item_rel_save_path not in accepted:
+            continue
+        if (
+            accepted is not None
+            and _link_state(item_abs_save_path, item_install_path)
+            != accepted[item_rel_save_path]
+        ):
+            raise ValueError("install path changed after install preflight")
         if not os.path.lexists(item_install_path) or confirm_replace(item_install_path):
-            accepted.append((item_rel_save_path, item_abs_save_path, item_install_path))
+            approved.append((item_rel_save_path, item_abs_save_path, item_install_path))
     messages = []
-    for item_rel_save_path, item_abs_save_path, item_install_path in accepted:
+    for item_rel_save_path, item_abs_save_path, item_install_path in approved:
         # The preflight above already obtained consent; do not prompt again.
         if _make_link(item_abs_save_path, item_install_path, lambda _: True):
             messages.append(f"Install {item_rel_save_path} -> {item_install_path}")
     return OperationResult(config, messages)
 
 
-def share(abs_save_path, install_path, config, dotfiles_root, confirm_replace):
+def _link_state(target, link):
+    """Classify a local link without changing it."""
+    if not os.path.lexists(link):
+        return "missing"
+    if not os.path.islink(link):
+        return "conflict"
+    actual = os.readlink(link)
+    module = ntpath if os_name() == "windows" else os.path
+    if not module.isabs(actual):
+        actual = module.join(module.dirname(link), actual)
+    if module.normcase(module.normpath(actual)) == module.normcase(
+        module.normpath(target)
+    ):
+        return "correct"
+    return "conflict"
+
+
+def _current_paths_equal(first, second):
+    """Compare current-platform paths using the current platform's semantics."""
+    if os_name() == "windows":
+        return ntpath.normcase(ntpath.normpath(expanduser(first))) == ntpath.normcase(
+            ntpath.normpath(second)
+        )
+    return normalize_path(first) == normalize_path(second)
+
+
+def validate_share_state(abs_save_path, install_path, config, dotfiles_root):
+    """Return an error for an immutable current mapping before a transaction."""
+    rel_save_path = os.path.relpath(abs_save_path, dotfiles_root).replace(
+        os.sep, posixpath.sep
+    )
+    current = config.get("dotfiles", {}).get(rel_save_path, {}).get(os_name())
+    if current is not None and not _current_paths_equal(current["path"], install_path):
+        return "current platform already has a different path; use dfm rm first"
+    if (
+        is_platform_specific_save_path(rel_save_path)
+        and rel_save_path.split("/")[1] != os_name()
+    ):
+        return "platform-specific saved object belongs to another platform"
+    return None
+
+
+def share(
+    abs_save_path,
+    install_path,
+    config,
+    dotfiles_root,
+    confirm_replace,
+    targets=None,
+    expected_state=None,
+):
     rel_save_path = os.path.relpath(abs_save_path, dotfiles_root).replace(
         os.sep, posixpath.sep
     )
@@ -491,9 +694,23 @@ def share(abs_save_path, install_path, config, dotfiles_root, confirm_replace):
     error = validate_install_target(install_path, dotfiles_root)
     if error:
         return OperationResult(config, [error])
+    state_error = validate_share_state(
+        abs_save_path, install_path, config, dotfiles_root
+    )
+    if state_error:
+        raise ValueError(state_error)
+    current = config["dotfiles"][rel_save_path].get(os_name())
+    updated = merge_targets(config, rel_save_path, targets or {})
+    state = _link_state(abs_save_path, install_path)
+    if expected_state is not None and state != expected_state:
+        raise ValueError("install path changed after share preflight")
+    if state == "conflict" and not confirm_replace(install_path):
+        return OperationResult(config, [])
+    if state != "correct":
+        _make_link(abs_save_path, install_path, lambda _: True)
+    if current is None:
+        updated = set_path(updated, rel_save_path, install_path)
     messages = []
-    if _make_link(abs_save_path, install_path, confirm_replace):
-        # Do not alter the mapping when the replacement was declined.
-        config = set_path(copy.deepcopy(config), rel_save_path, install_path)
+    if state != "correct" or current is None or updated != config:
         messages.append(f"share {rel_save_path} -> {install_path}")
-    return OperationResult(config, messages)
+    return OperationResult(updated, messages)

@@ -31,21 +31,44 @@ twine check dist/*
 ## 命令
 
 ```text
-dfm add <install_path> [--system] [--dry-run] [--force] [--backup]
+dfm add <install_path> [--system] [--non-interactive] [--target=SYSTEM=PATH]... [--dry-run] [--force] [--backup]
 dfm rm <path> [--dry-run] [--force] [--backup]
 dfm install [<save_path>] [--dry-run] [--force] [--backup]
-dfm share <save_path> <install_path> [--dry-run] [--force] [--backup]
+dfm share <save_path> <install_path> [--non-interactive] [--target=SYSTEM=PATH]... [--dry-run] [--force] [--backup]
 dfm view [--dry-run] [--force] [--backup]
 dfm doctor [--repair]
 ```
 
-- `add <install_path> [--system]`：将家目录中的文件或目录移入 `~/dotfiles`，并在原路径创建符号链接。`--system` 表示该配置与当前操作系统相关，会按当前系统名保存。
+- `add <install_path> [--system]`：将家目录中的文件或目录移入 `~/dotfiles`，并在原路径创建符号链接。TTY 中（除 `--system` 外）会先选择尚未声明的平台，再逐项选择安装路径；`--system` 表示该配置与当前操作系统相关，会按当前系统名保存且不提供跨平台目标。
 - `rm <path>`：移除已纳管项。可传入其安装路径（符号链接）或 `~/dotfiles` 中的保存路径；工具会移除链接并恢复文件。若该保存项仍被其他系统使用，会复制内容到当前安装路径。
 - `install [<save_path>]`：不带参数时，为当前系统配置的全部已纳管项创建符号链接；指定 `save_path` 时仅安装该保存项。
-- `share <save_path> <install_path>`：将 `~/dotfiles` 中已有的保存项关联到当前系统的另一个安装路径，并创建符号链接。
+- `share <save_path> <install_path>`：将保存项关联到当前系统路径，并可在向导中补充其他平台声明。当前平台已经登记为不同路径时会失败，必须先 `rm`；相同登记且链接正确时不作改动。
 - `view`：为当前系统已配置的项目生成 `~/dotfiles/view/<system>/home/` 下的可读相对符号链接视图。安装链接仍直接指向保存对象；视图是可再生的，已有视图目录需使用 `--force` 重建。
 
 `save_path` 是 `~/dotfiles` 中的保存路径，`install_path` 是配置的实际安装路径。路径可以使用 `~`。
+
+### 跨平台目标
+
+支持的平台固定为 `linux`、`darwin`、`windows`、`android`。脚本或 Agent 必须使用
+`--non-interactive`，可重复传入 `--target=SYSTEM=~/path`；非 TTY 的 `add`/`share`
+也必须显式使用该选项。目标不能是当前平台，必须是以 `/` 分隔且位于 home 下的
+`~/...` 路径，不能包含 `..`、home 本身或 `~/dotfiles`。已存在的同一路径声明是
+幂等的，不同路径永不被 `--force` 覆盖。TTY 向导先以复选框显示可用平台（Linux、
+macOS、Windows、Android (Termux)），再按固定平台顺序为所选项提供相同 home 相对路径、对
+`~/.config/<app>` 的 Windows/macOS 约定候选、定制路径和跳过选项；默认跳过，
+最终确认默认否。`--dry-run` 保留路径选择但跳过最终确认；非交互 dry-run 不读取
+stdin。
+
+Android（包括 Termux）使用唯一的 YAML 键 `android`。检测到 Android 时不会读取或
+回退到 `linux` 映射；不会创建 `termux` 平台键。**先备份并提交 dotfiles 仓库**：保留
+真实 Linux 机器共享使用的 `linux` 映射，同时在 Android 上添加 `android` 映射；仅将
+旧 Termux 专用的 `linux` 平台映射和平台专用 `linux` 保存对象手动重新登记或迁移。
+向导中 Android 始终显示为 **Android (Termux)**，只提供相同 home 相对路径候选。
+
+`share` 会先核对当前平台登记和本地链接：缺少登记但已有正确链接时只补登记；
+登记和正确链接都存在时为 no-op；缺链接时重建。普通文件、目录或错误链接只能在
+TTY 事务前确认替换，非交互模式必须给 `--force`。确认之后如果目标状态发生变化，
+操作会回滚而不是再次询问或盲目替换。
 
 ### 变更选项与恢复
 

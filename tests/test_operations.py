@@ -12,6 +12,104 @@ def _config(rel_path, install_path, system="linux"):
     return {"dotfiles": {rel_path: {system: {"path": str(install_path)}}}}
 
 
+def test_os_name_detects_android_before_linux_and_without_termux_shortcut(monkeypatch):
+    monkeypatch.setattr(operations.platform, "system", lambda: "Linux")
+    monkeypatch.setattr(operations.sys, "getandroidapilevel", lambda: 34, raising=False)
+    monkeypatch.setenv("ANDROID_ROOT", "/system")
+    monkeypatch.setenv("ANDROID_DATA", "/data")
+    assert operations.os_name() == "android"
+
+    monkeypatch.setattr(
+        operations.sys, "getandroidapilevel", lambda: None, raising=False
+    )
+    assert operations.os_name() == "android"
+
+    monkeypatch.delenv("ANDROID_ROOT")
+    monkeypatch.delenv("ANDROID_DATA")
+    monkeypatch.setenv("TERMUX_VERSION", "0.118")
+    assert operations.os_name() == "linux"
+
+    monkeypatch.setattr(operations.platform, "system", lambda: "Android")
+    assert operations.os_name() == "android"
+
+
+def test_os_name_android_detection_falls_through_every_source(monkeypatch):
+    monkeypatch.delenv("ANDROID_ROOT", raising=False)
+    monkeypatch.delenv("ANDROID_DATA", raising=False)
+    monkeypatch.delattr(operations.sys, "getandroidapilevel", raising=False)
+    monkeypatch.setattr(operations.platform, "system", lambda: "Linux")
+    assert operations.os_name() == "linux"
+
+    monkeypatch.setattr(operations.sys, "getandroidapilevel", 34, raising=False)
+    assert operations.os_name() == "linux"
+
+    monkeypatch.setattr(
+        operations.sys,
+        "getandroidapilevel",
+        lambda: (_ for _ in ()).throw(ValueError("unavailable")),
+        raising=False,
+    )
+    assert operations.os_name() == "linux"
+
+    monkeypatch.setattr(
+        operations.sys, "getandroidapilevel", lambda: "34", raising=False
+    )
+    monkeypatch.setenv("ANDROID_ROOT", "/system")
+    assert operations.os_name() == "linux"
+    monkeypatch.setenv("ANDROID_DATA", "/data")
+    assert operations.os_name() == "android"
+
+    monkeypatch.delenv("ANDROID_ROOT")
+    monkeypatch.delenv("ANDROID_DATA")
+    monkeypatch.setattr(operations.platform, "system", lambda: "Windows")
+    assert operations.os_name() == "windows"
+
+
+def test_android_targets_use_posix_validation_and_same_path_candidate(monkeypatch):
+    monkeypatch.setattr(operations, "os_name", lambda: "linux")
+    assert "android" in operations.SUPPORTED_SYSTEMS
+    assert operations.validate_foreign_target("android", "~/.config/app") is None
+    assert operations.validate_foreign_target("termux", "~/.config/app") is not None
+    with pytest.raises(ValueError, match="unsupported"):
+        operations.parse_target_mappings(
+            ["termux=~/.config/app"], current_system="linux"
+        )
+    assert operations.target_candidates("~/.config/app", "android") == [
+        ("same home-relative path", "~/.config/app")
+    ]
+    rel = "a" * 32 + "/android/item"
+    assert operations.is_platform_specific_save_path(rel)
+
+
+def test_android_current_namespace_never_falls_back_to_linux(tmp_path, monkeypatch):
+    home = tmp_path / "home"
+    root = home / "dotfiles"
+    saved = root / "saved"
+    home.mkdir()
+    root.mkdir()
+    saved.write_text("value")
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setattr(operations, "os_name", lambda: "android")
+    config = {
+        "dotfiles": {
+            "saved": {
+                "linux": {"path": "~/linux"},
+                "android": {"path": "~/android"},
+            }
+        }
+    }
+    assert operations.get_path(config, "saved") == str(home / "android")
+    linux_only = {"dotfiles": {"saved": {"linux": {"path": "~/linux"}}}}
+    assert operations.get_path(linux_only, "saved") is None
+    system_save = operations.get_save_path(str(home / "item"), True, str(root))
+    assert os.path.relpath(system_save, root).split(os.sep)[1] == "android"
+    installed = operations.install(str(saved), config, str(root), lambda _: True)
+    assert (home / "android").is_symlink()
+    assert installed.messages == [f"Install saved -> {home / 'android'}"]
+    entries = operations.plan_view(config, str(root))
+    assert entries[0].path.startswith(str(root / "view" / "android"))
+
+
 def test_get_save_path_hashes_shrunk_parent_and_optional_system(tmp_path, monkeypatch):
     home = tmp_path / "home"
     install_path = home / ".config" / "app"
@@ -338,6 +436,133 @@ def test_share_links_known_item_creates_parent_and_preserves_other_system(
         "linux": {"path": "~/nested/target"},
     }
     assert result.messages == [f"share saved -> {install_path}"]
+
+
+def test_share_matching_current_mapping_link_state_matrix(tmp_path, monkeypatch):
+    repo = tmp_path / "repo"
+    home = tmp_path / "home"
+    saved = repo / "saved"
+    target = home / "target"
+    repo.mkdir()
+    home.mkdir()
+    saved.write_text("saved")
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setattr(operations, "os_name", lambda: "linux")
+    config = {"dotfiles": {"saved": {"linux": {"path": "~/target"}}}}
+
+    # A correct current mapping and link is a genuine no-op, including relative links.
+    target.symlink_to("../repo/saved")
+    correct = operations.share(
+        str(saved), str(target), config, str(repo), lambda _: True
+    )
+    assert correct.config == config
+    assert correct.messages == []
+    assert os.readlink(target) == "../repo/saved"
+
+    # Missing links are rebuilt without changing the matching mapping.
+    target.unlink()
+    rebuilt = operations.share(
+        str(saved), str(target), config, str(repo), lambda _: True
+    )
+    assert target.is_symlink()
+    assert rebuilt.config == config
+    assert rebuilt.messages == [f"share saved -> {target}"]
+
+    # A conflicting object is left alone when refused and replaced only when approved.
+    target.unlink()
+    target.write_text("conflict")
+    refused = operations.share(
+        str(saved), str(target), config, str(repo), lambda _: False
+    )
+    assert refused.config == config
+    assert refused.messages == []
+    assert target.read_text() == "conflict"
+    replaced = operations.share(
+        str(saved), str(target), config, str(repo), lambda _: True
+    )
+    assert replaced.config == config
+    assert target.is_symlink()
+
+
+def test_windows_current_mapping_and_link_state_are_case_insensitive(monkeypatch):
+    monkeypatch.setattr(operations, "os_name", lambda: "windows")
+    monkeypatch.setattr(
+        operations,
+        "expanduser",
+        lambda path: r"C:\Users\Alice" + path[1:] if path.startswith("~") else path,
+    )
+    assert operations._current_paths_equal(r"~\TARGET", r"c:\users\alice\target")
+
+    monkeypatch.setattr(operations.os.path, "lexists", lambda _: True)
+    monkeypatch.setattr(operations.os.path, "islink", lambda _: True)
+    monkeypatch.setattr(operations.os, "readlink", lambda _: r"..\SAVED")
+    assert (
+        operations._link_state(r"c:\users\alice\Saved", r"C:\Users\Alice\Target\link")
+        == "correct"
+    )
+
+
+def test_target_mappings_are_portable_and_never_replace_conflicts(monkeypatch):
+    monkeypatch.setattr(operations, "os_name", lambda: "linux")
+    assert operations.parse_target_mappings(["darwin=~/.config/app"]) == {
+        "darwin": "~/.config/app"
+    }
+    with pytest.raises(ValueError, match="current platform"):
+        operations.parse_target_mappings(["linux=~/item"])
+    with pytest.raises(ValueError, match="safe path"):
+        operations.parse_target_mappings(["windows=~/one/../two"])
+    config = {"dotfiles": {"saved": {"darwin": {"path": "~/old"}}}}
+    with pytest.raises(ValueError, match="conflicting"):
+        operations.merge_targets(config, "saved", {"darwin": "~/new"})
+
+
+def test_windows_targets_compare_case_insensitively_and_reject_dotfiles(monkeypatch):
+    monkeypatch.setattr(operations, "os_name", lambda: "linux")
+    config = {"dotfiles": {"saved": {"windows": {"path": r"~\AppData\Tool"}}}}
+    merged = operations.merge_targets(config, "saved", {"windows": "~/appdata/tool"})
+    assert merged == config
+    assert operations.validate_foreign_target("windows", "~/DOTFILES/tool") is not None
+
+
+def test_windows_wizard_candidates_canonicalize_home_relative_config(monkeypatch):
+    monkeypatch.setattr(operations, "os_name", lambda: "windows")
+    monkeypatch.setattr(
+        operations,
+        "expanduser",
+        lambda path: r"C:\Users\Alice" if path == "~" else path,
+    )
+    candidates = operations.target_candidates(
+        r"C:\Users\Alice\.config\nvim\init", "darwin"
+    )
+    assert candidates == [
+        ("same home-relative path", "~/.config/nvim/init"),
+        (
+            "macOS Application Support convention",
+            "~/Library/Application Support/nvim/init",
+        ),
+    ]
+
+
+def test_platform_specific_paths_reject_foreign_targets_and_share_move(
+    tmp_path, monkeypatch
+):
+    rel = "a" * 32 + "/darwin/item"
+    assert operations.is_platform_specific_save_path(rel)
+    with pytest.raises(ValueError, match="platform-specific"):
+        operations.merge_targets({"dotfiles": {rel: {}}}, rel, {"linux": "~/item"})
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    saved = repo / "saved"
+    saved.write_text("saved")
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setattr(operations, "os_name", lambda: "linux")
+    config = _config("saved", "~/old")
+    with pytest.raises(ValueError, match="different path"):
+        operations.share(
+            str(saved), str(home / "new"), config, str(repo), lambda _: True
+        )
 
 
 def test_add_moves_directory_and_records_link(tmp_path, monkeypatch):
