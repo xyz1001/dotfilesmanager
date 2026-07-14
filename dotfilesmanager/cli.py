@@ -244,7 +244,7 @@ def _direct_paths(command, args, dotfiles_config, root, resolved_save_path=None)
     if command == "view":
         return [os.path.join(root, operations.VIEW_DIRECTORY)]
     paths = []
-    selected = operations.normalize_path(args.get("<save_path>"))
+    selected = resolved_save_path or operations.normalize_path(args.get("<save_path>"))
     for rel_path in dotfiles_config["dotfiles"]:
         if (
             selected is not None
@@ -387,6 +387,7 @@ def _main():
             print(f"Dry-run: {command}; no changes made")
             return
         rm_save_path = None
+        saved = None
         if command == "add":
             install = operations.normalize_path(args["<install_path>"])
             error = operations.validate_add(install, args.get("--system", False), root)
@@ -394,7 +395,9 @@ def _main():
                 _fail(error)
         elif command == "rm":
             path = operations.normalize_path(args["<path>"])
-            rm_save_path = operations._remove_save_path(path, root)
+            rm_save_path = operations.resolve_view_save_path(args["<path>"], root)
+            if rm_save_path == path:
+                rm_save_path = operations._remove_save_path(path, root)
             error = operations.validate_remove(path, root, rm_save_path)
             if error:
                 _fail(error)
@@ -407,7 +410,7 @@ def _main():
         elif command == "share" or (
             command == "install" and args.get("<save_path>") is not None
         ):
-            saved = operations.normalize_path(args["<save_path>"])
+            saved = operations.resolve_view_save_path(args["<save_path>"], root)
             error = operations.validate_saved_object(saved, root)
             if error:
                 _fail(error)
@@ -437,13 +440,20 @@ def _main():
             error = operations.validate_install_sources(
                 dotfiles_config,
                 root,
-                operations.normalize_path(args.get("<save_path>")),
+                saved,
             )
             if error:
                 _fail(error)
         if command != "view":
             error = operations.validate_mutation_paths(
-                _direct_paths(command, args, dotfiles_config, root, rm_save_path), root
+                _direct_paths(
+                    command,
+                    args,
+                    dotfiles_config,
+                    root,
+                    rm_save_path or saved,
+                ),
+                root,
             )
             if error:
                 _fail(error)
@@ -468,6 +478,7 @@ def _main():
         original_config = copy.deepcopy(dotfiles_config)
         share_state = None
         rm_save_path = None
+        saved = None
         if command == "add":
             install = operations.normalize_path(args["<install_path>"])
             error = operations.validate_add(install, args.get("--system", False), root)
@@ -475,7 +486,9 @@ def _main():
                 _fail(error)
         elif command == "rm":
             path = operations.normalize_path(args["<path>"])
-            rm_save_path = operations._remove_save_path(path, root)
+            rm_save_path = operations.resolve_view_save_path(args["<path>"], root)
+            if rm_save_path == path:
+                rm_save_path = operations._remove_save_path(path, root)
             error = operations.validate_remove(path, root, rm_save_path)
             if error:
                 _fail(error)
@@ -488,7 +501,7 @@ def _main():
         elif command == "share" or (
             command == "install" and args.get("<save_path>") is not None
         ):
-            saved = operations.normalize_path(args["<save_path>"])
+            saved = operations.resolve_view_save_path(args["<save_path>"], root)
             error = operations.validate_saved_object(saved, root)
             if error:
                 _fail(error)
@@ -522,12 +535,12 @@ def _main():
             error = operations.validate_install_sources(
                 dotfiles_config,
                 root,
-                operations.normalize_path(args.get("<save_path>")),
+                saved,
             )
             if error:
                 _fail(error)
             install_approved = _preconfirm_install(
-                operations.normalize_path(args.get("<save_path>")),
+                saved,
                 dotfiles_config,
                 root,
                 args.get("--force", False),
@@ -546,7 +559,14 @@ def _main():
 
         if command != "view":
             error = operations.validate_mutation_paths(
-                _direct_paths(command, args, dotfiles_config, root, rm_save_path), root
+                _direct_paths(
+                    command,
+                    args,
+                    dotfiles_config,
+                    root,
+                    rm_save_path or saved,
+                ),
+                root,
             )
             if error:
                 _fail(error)
@@ -569,7 +589,7 @@ def _main():
             )
         elif command == "install":
             result = operations.install(
-                operations.normalize_path(args.get("<save_path>")),
+                saved,
                 dotfiles_config,
                 root,
                 confirm,
@@ -577,7 +597,7 @@ def _main():
             )
         elif command == "share":
             result = operations.share(
-                operations.normalize_path(args["<save_path>"]),
+                saved,
                 operations.normalize_path(args["<install_path>"]),
                 dotfiles_config,
                 root,

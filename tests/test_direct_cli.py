@@ -237,3 +237,78 @@ def test_direct_install_keeps_correct_link_without_prompt_or_output(
 
     assert os.readlink(install) == target
     assert "Install" not in capsys.readouterr().out
+
+
+def test_view_paths_resolve_for_rm_install_and_share(tmp_path, monkeypatch):
+    home, root = _environment(tmp_path, monkeypatch)
+    root.mkdir()
+    namespace = "a" * 32
+    saved_rm = root / namespace / "saved-rm"
+    saved_install = root / namespace / "saved-install"
+    saved_share = root / namespace / "saved-share"
+    saved_rm.parent.mkdir()
+    for saved in (saved_rm, saved_install, saved_share):
+        saved.write_text(saved.name)
+    install_rm = home / ".rm"
+    install_install = home / ".install"
+    install_share = home / ".share"
+    install_rm.symlink_to(saved_rm)
+    config.save_config(
+        str(root),
+        {
+            "dotfiles": {
+                f"{namespace}/saved-rm": {"linux": {"path": str(install_rm)}},
+                f"{namespace}/saved-install": {"linux": {"path": str(install_install)}},
+                f"{namespace}/saved-share": {"linux": {"path": str(install_share)}},
+            }
+        },
+    )
+    view_root = root / "view" / "manual"
+    view_root.mkdir(parents=True)
+    rm_view = view_root / "rm"
+    install_view = view_root / "install"
+    share_view = view_root / "share"
+    rm_view.symlink_to(os.path.relpath(saved_rm, rm_view.parent))
+    install_view.symlink_to(os.path.relpath(saved_install, install_view.parent))
+    share_view.symlink_to(saved_share)
+    assert operations.resolve_view_save_path(str(install_view), str(root)) == str(
+        saved_install
+    )
+
+    before_dry_run = (root / "dfm.yaml").read_bytes()
+    _run(monkeypatch, "install", install_view, "--dry-run")
+    assert not os.path.lexists(install_install)
+    assert (root / "dfm.yaml").read_bytes() == before_dry_run
+    _run(monkeypatch, "install", install_view, "--force")
+    assert install_install.is_symlink()
+
+    _run(
+        monkeypatch,
+        "share",
+        share_view,
+        install_share,
+        "--non-interactive",
+        "--dry-run",
+    )
+    assert not os.path.lexists(install_share)
+    assert (root / "dfm.yaml").read_bytes() == before_dry_run
+    _run(monkeypatch, "share", share_view, install_share, "--non-interactive")
+    assert install_share.is_symlink()
+
+    _run(monkeypatch, "rm", rm_view, "--all", "--force", "--dry-run")
+    assert saved_rm.read_text() == "saved-rm"
+    assert install_rm.is_symlink()
+    assert (root / "dfm.yaml").read_bytes() == before_dry_run
+    _run(monkeypatch, "rm", rm_view, "--all", "--force")
+    assert install_rm.read_text() == "saved-rm"
+    assert f"{namespace}/saved-rm" not in config.load_config(str(root))["dotfiles"]
+
+
+def test_unmanaged_view_path_remains_rejected(tmp_path, monkeypatch):
+    home, root = _environment(tmp_path, monkeypatch)
+    root.mkdir()
+    config.save_config(str(root), {"dotfiles": {}})
+    unmanaged = root / "view" / "linux" / "home" / ".unmanaged"
+
+    with pytest.raises(SystemExit):
+        _run(monkeypatch, "install", unmanaged, "--dry-run")

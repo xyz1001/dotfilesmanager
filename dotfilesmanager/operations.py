@@ -349,6 +349,52 @@ def plan_view(config, dotfiles_root):
     return entries
 
 
+def resolve_view_save_path(path, dotfiles_root):
+    """Resolve a direct view symlink to its canonical hash-namespaced target."""
+    path = normalize_path(path)
+    if path is None:
+        return None
+    try:
+        root = os.path.abspath(dotfiles_root)
+        view_root = os.path.join(root, VIEW_DIRECTORY)
+        if (
+            _same_path(path, view_root)
+            or not _is_within(path, view_root)
+            or not os.path.islink(path)
+        ):
+            return path
+        parent = os.path.dirname(path)
+        while _is_within(parent, view_root):
+            if os.path.lexists(parent) and _is_link_or_reparse(parent):
+                return path
+            if _same_path(parent, view_root):
+                break
+            parent = os.path.dirname(parent)
+
+        target = os.readlink(path)
+        if not os.path.isabs(target):
+            target = os.path.join(os.path.dirname(path), target)
+        target = os.path.abspath(os.path.normpath(target))
+        if not _is_within(target, root):
+            return path
+        namespace = os.path.relpath(target, root).split(os.sep)[0]
+        if (
+            len(namespace) != 32
+            or any(character not in "0123456789abcdef" for character in namespace)
+            or not (os.path.isfile(target) or os.path.isdir(target))
+        ):
+            return path
+        real_root = os.path.realpath(root)
+        real_target = os.path.realpath(target)
+        if not _is_within(real_target, real_root) or _is_excluded_view_source(
+            real_target, real_root
+        ):
+            return path
+        return target
+    except OSError:
+        return path
+
+
 def validate_view_root(dotfiles_root, force=False):
     """A view root can only be absent or an actual directory."""
     view_root = os.path.join(dotfiles_root, VIEW_DIRECTORY)

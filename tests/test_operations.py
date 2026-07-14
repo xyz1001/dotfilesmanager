@@ -1288,6 +1288,90 @@ def test_view_rejects_saved_alias_into_view_and_missing_source(tmp_path, monkeyp
         operations.plan_view(_config("missing", "~/item"), str(repo))
 
 
+def test_view_alias_resolver_accepts_direct_hash_targets_and_rejects_others(tmp_path):
+    repo = tmp_path / "dotfiles"
+    namespace = "a" * 32
+    saved = repo / namespace / "saved"
+    directory = repo / namespace / "directory"
+    saved.parent.mkdir(parents=True)
+    saved.write_text("value")
+    directory.mkdir()
+    internal_target = repo / "internal-target"
+    internal_target.write_text("internal")
+    internal_saved = repo / namespace / "internal"
+    internal_saved.symlink_to(internal_target)
+    view = repo / "view"
+    view.mkdir()
+    relative = view / "relative"
+    absolute = view / "absolute"
+    relative.symlink_to(os.path.relpath(saved, relative.parent))
+    absolute.symlink_to(saved)
+    internal_link = view / "internal"
+    internal_link.symlink_to(internal_saved)
+
+    assert operations.resolve_view_save_path(str(relative), str(repo)) == str(saved)
+    assert operations.resolve_view_save_path(str(absolute), str(repo)) == str(saved)
+    assert operations.resolve_view_save_path(str(internal_link), str(repo)) == str(
+        internal_saved
+    )
+
+    outside = tmp_path / "outside"
+    outside.write_text("outside")
+    non_hash = repo / "plain"
+    non_hash.write_text("plain")
+    outside_link = view / "outside"
+    non_hash_link = view / "plain"
+    directory_link = view / "directory"
+    dangling_link = view / "dangling"
+    escaping_saved = repo / namespace / "escaping"
+    escaping_link = view / "escaping"
+    regular_view_file = view / "regular"
+    outside_link.symlink_to(outside)
+    non_hash_link.symlink_to(non_hash)
+    directory_link.symlink_to(directory, target_is_directory=True)
+    dangling_link.symlink_to(repo / namespace / "missing")
+    escaping_saved.symlink_to(outside)
+    escaping_link.symlink_to(escaping_saved)
+    regular_view_file.write_text("regular")
+    descendant = directory_link / "child"
+    (directory / "child").write_text("child")
+    external_view = tmp_path / "external-view"
+    external_view.mkdir()
+    nested_alias = external_view / "alias"
+    nested_alias.symlink_to(saved)
+    nested_parent = view / "nested"
+    nested_parent.symlink_to(external_view, target_is_directory=True)
+
+    assert operations.resolve_view_save_path(str(directory_link), str(repo)) == str(
+        directory
+    )
+
+    for path in (
+        outside_link,
+        non_hash_link,
+        dangling_link,
+        escaping_link,
+        regular_view_file,
+        descendant,
+        nested_parent / "alias",
+        view / "missing",
+    ):
+        assert operations.resolve_view_save_path(str(path), str(repo)) == str(path)
+
+
+@pytest.mark.parametrize("trailing_slash", [False, True])
+def test_view_alias_resolver_rejects_view_root_symlink(tmp_path, trailing_slash):
+    repo = tmp_path / "dotfiles"
+    saved = repo / ("a" * 32) / "saved"
+    saved.parent.mkdir(parents=True)
+    saved.write_text("value")
+    view = repo / "view"
+    view.symlink_to(saved)
+    path = str(view) + (os.sep if trailing_slash else "")
+
+    assert operations.resolve_view_save_path(path, str(repo)) == str(view)
+
+
 def test_view_rejects_home_conflicts_and_unsafe_sources(tmp_path, monkeypatch):
     home = tmp_path / "home"
     repo = home / "dotfiles"
