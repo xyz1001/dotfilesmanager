@@ -19,7 +19,7 @@ Usage:
     dfm rm <path> [--all] [--dry-run] [--force]
     dfm install [<save_path>] [--dry-run] [--force]
     dfm share <save_path> <install_path> [--non-interactive] [--target=<mapping>...] [--dry-run] [--force]
-    dfm view [--dry-run] [--force]
+    dfm view [--dry-run]
     dfm doctor
     dfm setup
 
@@ -425,7 +425,7 @@ def _main():
                 _fail(str(error))
             error = operations.validate_view_mutation_root(
                 root
-            ) or operations.validate_view_root(root, args.get("--force", False))
+            ) or operations.validate_view_root(root, force=True)
             if error:
                 _fail(error)
             print(f"Dry-run: {command}; no changes made")
@@ -524,7 +524,7 @@ def _main():
                 _fail(str(error))
             error = operations.validate_view_mutation_root(
                 root
-            ) or operations.validate_view_root(root, args.get("--force", False))
+            ) or operations.validate_view_root(root, force=True)
             if error:
                 _fail(error)
         original_config = copy.deepcopy(dotfiles_config)
@@ -667,7 +667,7 @@ def _main():
                 share_state,
             )
         else:
-            result = operations.view(dotfiles_config, root, args.get("--force", False))
+            result = operations.view(dotfiles_config, root, force=True)
         if command in ("add", "rm", "share") and result.config != original_config:
             config.save_config(root, result.config)
             try:
@@ -680,7 +680,7 @@ def _main():
             except Exception as error:
                 raise RuntimeError(
                     "configuration was saved but view rebuild failed; "
-                    "run dfm view --force to repair"
+                    "run dfm view to repair"
                 ) from error
             result.messages.extend(view_result.messages)
         return result

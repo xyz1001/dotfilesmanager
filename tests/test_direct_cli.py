@@ -216,9 +216,9 @@ def test_view_force_and_direct_partial_state_on_config_failure(tmp_path, monkeyp
     entries = operations.plan_view(config.load_config(str(root)), str(root))
     assert len(entries) == 1
     assert os.path.islink(entries[0].path)
+    _run(monkeypatch, "view")
     with pytest.raises(SystemExit):
-        _run(monkeypatch, "view")
-    _run(monkeypatch, "view", "--force")
+        _run(monkeypatch, "view", "--force")
 
     other = home / ".other"
     other.write_text("other")

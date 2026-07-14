@@ -103,7 +103,7 @@ def test_auto_view_failure_keeps_saved_config_and_reports_repair(monkeypatch):
     save.assert_called_once_with("/repo", result.config)
     view.assert_called_once_with(result.config, "/repo", force=True)
     assert error.value.__cause__ is rebuild_error
-    assert "dfm view --force" in str(error.value)
+    assert "dfm view to repair" in str(error.value)
 
 
 def test_auto_view_root_validation_failure_keeps_saved_config(monkeypatch):
@@ -719,5 +719,5 @@ def test_view_dispatches_without_saving_configuration(monkeypatch):
 
     cli.main()
 
-    view.assert_called_once_with(dotfiles_config, "/repo", False)
+    view.assert_called_once_with(dotfiles_config, "/repo", force=True)
     save.assert_not_called()

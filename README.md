@@ -35,7 +35,7 @@ dfm add <install_path> [--system] [--non-interactive] [--target=SYSTEM=PATH]... 
 dfm rm <path> [--all] [--dry-run] [--force]
 dfm install [<save_path>] [--dry-run] [--force]
 dfm share <save_path> <install_path> [--non-interactive] [--target=SYSTEM=PATH]... [--dry-run] [--force]
-dfm view [--dry-run] [--force]
+dfm view [--dry-run]
 dfm doctor
 dfm setup
 ```
@@ -44,7 +44,7 @@ dfm setup
 - `rm <path>`：TTY 中会选择要移除的已登记平台，默认选中当前平台；仅移除其他平台时不访问本机或外部安装路径，若仍有登记则只删除所选登记，若清空最后登记则删除保存对象。选中当前平台时会移除链接并恢复文件；若保留其他平台登记则复制保存对象。可传入其安装路径（符号链接）、`~/dotfiles` 中的保存路径，或 `view/` 下直接指向哈希保存命名空间的符号链接。`--all` 跳过选择，删除所有平台登记和保存对象：当前平台已登记时先恢复到其本地安装路径，未登记时直接删除保存对象；绝不访问其他机器的安装路径。非 TTY 调用保持默认仅移除当前平台。
 - `install [<save_path>]`：不带参数时，为当前系统配置的全部已纳管项创建符号链接；指定 `save_path`（也可为 `view/` 下直接指向哈希保存命名空间的符号链接）时仅安装该保存项。
 - `share <save_path> <install_path>`：将保存项关联到当前系统路径，并可在向导中补充其他平台声明。`save_path` 也可为 `view/` 下直接指向哈希保存命名空间的符号链接。当前平台已经登记为不同路径时会失败，必须先 `rm`；相同登记且链接正确时不作改动。
-- `view`：为当前系统已配置的项目生成 `~/dotfiles/view/<system>/home/` 下的可读相对符号链接视图。安装链接仍直接指向保存对象；视图是可再生的，已有视图目录需使用 `--force` 重建。
+- `view`：为所有已配置平台的项目生成 `~/dotfiles/view/<system>/home/` 下的可读相对符号链接视图。安装链接仍直接指向保存对象；视图是可再生的，每次执行都会重建已有视图目录。
 - `setup`：仅 Windows 可用；实际探测普通用户的链接能力，必要时通过 UAC 启用 Developer Mode。
 
 `save_path` 是 `~/dotfiles` 中的保存路径，`install_path` 是配置的实际安装路径。路径可以使用 `~`。
