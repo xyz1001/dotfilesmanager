@@ -1,7 +1,6 @@
 """Command-line adapter for dotfilesmanager."""
 
 import copy
-import ctypes
 import os
 import re
 import sys
@@ -10,7 +9,7 @@ import inquirer
 from docopt import docopt
 from inquirer.errors import ValidationError
 
-from . import config, operations, transaction
+from . import config, operations, transaction, windows
 
 USAGE = """
 dotfile管理工具(dotfiles manager)，dotfile指保存配置信息的文件或包含配置文件的文件夹
@@ -22,6 +21,7 @@ Usage:
     dfm share <save_path> <install_path> [--non-interactive] [--target=<mapping>...] [--dry-run] [--force] [--backup]
     dfm view [--dry-run] [--force] [--backup]
     dfm doctor [--repair]
+    dfm setup
 
 Options:
     -h --help  显示帮助
@@ -322,7 +322,9 @@ def _doctor(root, repair):
                     os.makedirs(os.path.dirname(link), exist_ok=True)
                     if os.path.lexists(link):
                         os.unlink(link)
-                    os.symlink(saved, link)
+                    windows.create_symlink(
+                        saved, link, target_is_directory=os.path.isdir(saved)
+                    )
                 tx.commit()
                 print(f"Recreated {len(repair_links)} install link(s)")
                 return
@@ -366,12 +368,23 @@ def _unreferenced_saved_objects(root, dotfiles_config):
 
 
 def main():
-    if operations.os_name() == "windows":
-        if ctypes.windll.shell32.IsUserAnAdmin() == 0:
-            print("dfm must run with Administrator priviledges under Windows")
-            return
+    try:
+        _main()
+    except windows.SymlinkPrivilegeError:
+        _fail(
+            "Windows could not create a symbolic link because the required "
+            "privilege is not held. Run dfm setup, then retry."
+        )
 
+
+def _main():
     args = docopt(USAGE)
+    if args.get("setup"):
+        result = windows.setup_developer_mode()
+        print(result.message)
+        if not result.success:
+            raise SystemExit(-1)
+        return
     root = config.default_dotfiles_root()
     if args.get("doctor"):
         _doctor(root, args.get("--repair", False))

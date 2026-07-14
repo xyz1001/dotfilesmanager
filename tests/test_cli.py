@@ -5,7 +5,7 @@ from unittest.mock import ANY, Mock
 
 import pytest
 
-from dotfilesmanager import cli, operations
+from dotfilesmanager import cli, operations, transaction
 
 
 @pytest.fixture(autouse=True)
@@ -443,22 +443,64 @@ def test_confirm_replace_only_accepts_y(monkeypatch, answer, expected):
     prompt.assert_called_once_with("文件 /existing 已存在，是否替换？(y/N)")
 
 
-def test_main_blocks_non_administrator_on_windows(monkeypatch, capsys):
+def test_main_dispatches_on_windows_without_administrator_gate(monkeypatch):
     monkeypatch.setattr(cli.operations, "os_name", lambda: "windows")
-    monkeypatch.setattr(
-        cli,
-        "ctypes",
-        SimpleNamespace(
-            windll=SimpleNamespace(shell32=SimpleNamespace(IsUserAnAdmin=lambda: 0))
-        ),
-    )
-    parse = Mock()
-    monkeypatch.setattr(cli, "docopt", parse)
+    monkeypatch.setattr(cli, "docopt", Mock(return_value=_args("doctor")))
+    monkeypatch.setattr(cli.config, "default_dotfiles_root", Mock(return_value="/repo"))
+    doctor = Mock()
+    monkeypatch.setattr(cli, "_doctor", doctor)
 
     cli.main()
 
-    assert "Administrator priviledges" in capsys.readouterr().out
-    parse.assert_not_called()
+    doctor.assert_called_once_with("/repo", False)
+
+
+def test_only_symlink_privilege_error_gets_setup_guidance(monkeypatch, capsys):
+    monkeypatch.setattr(cli, "docopt", Mock(return_value=_args("doctor")))
+    monkeypatch.setattr(cli.config, "default_dotfiles_root", Mock(return_value="/repo"))
+    monkeypatch.setattr(
+        cli, "_doctor", Mock(side_effect=cli.windows.SymlinkPrivilegeError())
+    )
+
+    with pytest.raises(SystemExit):
+        cli.main()
+
+    assert "Run dfm setup, then retry." in capsys.readouterr().out
+
+
+def test_transaction_snapshot_1314_reaches_cli_setup_guidance(
+    tmp_path, monkeypatch, capsys
+):
+    source = tmp_path / "source"
+    source.write_text("value")
+    link = tmp_path / "link"
+    link.symlink_to(source)
+    error = OSError("privilege missing")
+    error.winerror = 1314
+    monkeypatch.setattr(transaction.os, "symlink", Mock(side_effect=error))
+    monkeypatch.setattr(cli, "docopt", Mock(return_value=_args("doctor")))
+    monkeypatch.setattr(cli.config, "default_dotfiles_root", Mock(return_value="/repo"))
+    monkeypatch.setattr(
+        cli,
+        "_doctor",
+        lambda *_: transaction._copy_snapshot(str(link), str(tmp_path / "backup")),
+    )
+
+    with pytest.raises(SystemExit):
+        cli.main()
+
+    assert "Run dfm setup, then retry." in capsys.readouterr().out
+
+
+def test_unrelated_symlink_error_remains_native(monkeypatch, capsys):
+    monkeypatch.setattr(cli, "docopt", Mock(return_value=_args("doctor")))
+    monkeypatch.setattr(cli.config, "default_dotfiles_root", Mock(return_value="/repo"))
+    monkeypatch.setattr(cli, "_doctor", Mock(side_effect=OSError("disk failure")))
+
+    with pytest.raises(OSError, match="disk failure"):
+        cli.main()
+
+    assert "Run dfm setup" not in capsys.readouterr().out
 
 
 def test_view_dispatches_without_saving_configuration(monkeypatch):

@@ -19,6 +19,8 @@ from platformdirs.macos import MacOS
 from platformdirs.unix import Unix
 from platformdirs.windows import Windows
 
+from . import windows
+
 
 @dataclass
 class OperationResult:
@@ -316,7 +318,7 @@ def view(config, dotfiles_root, force=False):
     os.makedirs(view_root)
     for entry in entries:
         os.makedirs(os.path.dirname(entry.path), exist_ok=True)
-        os.symlink(
+        windows.create_symlink(
             os.path.relpath(entry.target, os.path.dirname(entry.path)),
             entry.path,
             target_is_directory=entry.is_directory,
@@ -650,7 +652,7 @@ def _make_link(target, link, confirm_replace):
             os.remove(link)
         else:
             shutil.rmtree(link)
-    os.symlink(target, link)
+    windows.create_symlink(target, link, target_is_directory=os.path.isdir(target))
     return True
 
 
@@ -658,7 +660,9 @@ def add(install_path, system, config, dotfiles_root, targets=None):
     abs_save_path = get_save_path(install_path, system, dotfiles_root)
     os.makedirs(os.path.dirname(abs_save_path), exist_ok=True)
     shutil.move(install_path, abs_save_path)
-    os.symlink(abs_save_path, install_path)
+    windows.create_symlink(
+        abs_save_path, install_path, target_is_directory=os.path.isdir(abs_save_path)
+    )
     rel_save_path = os.path.relpath(abs_save_path, dotfiles_root).replace(
         os.sep, posixpath.sep
     )
