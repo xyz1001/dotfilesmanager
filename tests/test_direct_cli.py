@@ -37,6 +37,122 @@ def test_direct_add_then_rm_all(tmp_path, monkeypatch):
     assert config.load_config(str(root)) == {"dotfiles": {}}
 
 
+def test_direct_rm_all_restores_current_and_removes_foreign_registration(
+    tmp_path, monkeypatch
+):
+    home, root = _environment(tmp_path, monkeypatch)
+    root.mkdir()
+    saved = root / "saved"
+    install = home / ".item"
+    saved.write_text("value")
+    install.symlink_to(saved)
+    config.save_config(
+        str(root),
+        {
+            "dotfiles": {
+                "saved": {
+                    "linux": {"path": str(install)},
+                    "darwin": {"path": "~/inaccessible"},
+                }
+            }
+        },
+    )
+
+    _run(monkeypatch, "rm", saved, "--all", "--force")
+
+    assert install.read_text() == "value"
+    assert not saved.exists()
+    assert config.load_config(str(root)) == {"dotfiles": {}}
+
+
+def test_rm_last_foreign_selection_rejects_saved_symlink_parent_before_mutation(
+    tmp_path, monkeypatch
+):
+    home, root = _environment(tmp_path, monkeypatch)
+    root.mkdir()
+    namespace = "a" * 32
+    external = tmp_path / "external"
+    external.mkdir()
+    saved = root / namespace / "saved"
+    (external / "saved").write_text("value")
+    (root / namespace).symlink_to(external, target_is_directory=True)
+    config.save_config(
+        str(root), {"dotfiles": {f"{namespace}/saved": {"darwin": {"path": "~/x"}}}}
+    )
+    before = (root / "dfm.yaml").read_bytes()
+    monkeypatch.setattr(cli, "_select_remove_systems", lambda *_: {"darwin"})
+
+    for extra in (("--dry-run",), ()):
+        with pytest.raises(SystemExit):
+            _run(monkeypatch, "rm", saved, "--force", *extra)
+        assert saved.read_text() == "value"
+        assert (root / "dfm.yaml").read_bytes() == before
+
+
+@pytest.mark.parametrize("selection", [set(), {"linux"}])
+def test_rm_noop_selection_preserves_config_bytes(tmp_path, monkeypatch, selection):
+    home, root = _environment(tmp_path, monkeypatch)
+    root.mkdir()
+    saved = root / "saved"
+    saved.write_text("value")
+    systems = {"linux": {"path": str(home / ".item")}}
+    if selection == {"linux"}:
+        systems = {"darwin": {"path": "~/foreign"}}
+    config.save_config(str(root), {"dotfiles": {"saved": systems}})
+    before = (root / "dfm.yaml").read_bytes()
+    monkeypatch.setattr(cli, "_select_remove_systems", lambda *_: selection)
+
+    _run(monkeypatch, "rm", saved, "--force")
+
+    assert saved.read_text() == "value"
+    assert (root / "dfm.yaml").read_bytes() == before
+
+
+def test_rm_foreign_selection_saves_changed_config(tmp_path, monkeypatch):
+    home, root = _environment(tmp_path, monkeypatch)
+    root.mkdir()
+    saved = root / "saved"
+    install = home / ".item"
+    saved.write_text("value")
+    install.symlink_to(saved)
+    config.save_config(
+        str(root),
+        {
+            "dotfiles": {
+                "saved": {
+                    "linux": {"path": str(install)},
+                    "darwin": {"path": "~/foreign"},
+                }
+            }
+        },
+    )
+    before = (root / "dfm.yaml").read_bytes()
+    monkeypatch.setattr(cli, "_select_remove_systems", lambda *_: {"darwin"})
+
+    _run(monkeypatch, "rm", saved, "--force")
+
+    assert (root / "dfm.yaml").read_bytes() != before
+    assert config.load_config(str(root))["dotfiles"]["saved"] == {
+        "linux": {"path": str(install)}
+    }
+
+
+def test_rm_last_foreign_selection_deletes_saved_object(tmp_path, monkeypatch):
+    _, root = _environment(tmp_path, monkeypatch)
+    root.mkdir()
+    saved = root / "saved"
+    saved.write_text("value")
+    config.save_config(
+        str(root), {"dotfiles": {"saved": {"darwin": {"path": "~/foreign"}}}}
+    )
+    monkeypatch.setattr(cli, "_select_remove_systems", lambda *_: {"darwin"})
+
+    _run(monkeypatch, "rm", saved, "--force")
+
+    assert not saved.exists()
+    assert config.load_config(str(root)) == {"dotfiles": {}}
+
+
 def test_direct_share_install_and_noninteractive_target_persistence(
     tmp_path, monkeypatch
 ):

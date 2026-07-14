@@ -151,6 +151,31 @@ def _target_wizard(install_path, configured, dry_run=False):
     return selected
 
 
+def _select_remove_systems(args, configured):
+    """Choose registered systems to remove, without prompting outside a TTY."""
+    current = operations.os_name()
+    systems = list(configured)
+    if args.get("--all", False):
+        return set(systems)
+    if not sys.stdin.isatty():
+        return {current}
+    answers = _prompt_targets(
+        [
+            inquirer.Checkbox(
+                "systems",
+                message="Select systems to remove",
+                choices=[
+                    (_SYSTEM_LABELS.get(system, system), system) for system in systems
+                ],
+                default=[current] if current in configured else [],
+            )
+        ]
+    )
+    if not answers or "systems" not in answers:
+        return None
+    return set(answers["systems"]).intersection(systems)
+
+
 def _select_targets(args, command, install_path, dotfiles_config, root, dry_run):
     """Validate/collect targets before a direct mutation."""
     supplied = args.get("--target", []) or []
@@ -214,7 +239,9 @@ def _preconfirm_install(abs_save_path, dotfiles_config, root, force):
     return approved
 
 
-def _direct_paths(command, args, dotfiles_config, root, resolved_save_path=None):
+def _direct_paths(
+    command, args, dotfiles_config, root, resolved_save_path=None, selected_systems=None
+):
     """Return direct paths each operation may replace, move, or unlink."""
     if command == "add":
         install = operations.normalize_path(args["<install_path>"])
@@ -223,6 +250,23 @@ def _direct_paths(command, args, dotfiles_config, root, resolved_save_path=None)
             operations.get_save_path(install, args.get("--system", False), root),
         ]
     if command == "rm":
+        # A foreign-only removal changes configuration only unless it removes
+        # the final registered platform, in which case it also deletes saved.
+        if (
+            not args.get("--all", False)
+            and selected_systems is not None
+            and operations.os_name() not in selected_systems
+        ):
+            saved = resolved_save_path
+            if saved is None:
+                path = operations.normalize_path(args["<path>"])
+                saved = operations._remove_save_path(path, root)
+            rel_path = os.path.relpath(saved, root).replace(os.sep, "/")
+            registered = set(dotfiles_config.get("dotfiles", {}).get(rel_path, {}))
+            selected = set(selected_systems).intersection(registered)
+            if not selected or selected != registered:
+                return []
+            return [saved]
         saved = resolved_save_path
         if saved is None:
             path = operations.normalize_path(args["<path>"])
@@ -387,6 +431,7 @@ def _main():
             print(f"Dry-run: {command}; no changes made")
             return
         rm_save_path = None
+        selected_remove_systems = None
         saved = None
         if command == "add":
             install = operations.normalize_path(args["<install_path>"])
@@ -402,11 +447,17 @@ def _main():
             if error:
                 _fail(error)
             rel_path = os.path.relpath(rm_save_path, root).replace(os.sep, "/")
-            error = operations.validate_remove_destination(
-                dotfiles_config, rel_path, root, args.get("--force", False)
+            selected_remove_systems = _select_remove_systems(
+                args, dotfiles_config["dotfiles"].get(rel_path, {})
             )
-            if error:
-                _fail(error)
+            if selected_remove_systems is None:
+                return
+            if operations.os_name() in selected_remove_systems:
+                error = operations.validate_remove_destination(
+                    dotfiles_config, rel_path, root, args.get("--force", False)
+                )
+                if error:
+                    _fail(error)
         elif command == "share" or (
             command == "install" and args.get("<save_path>") is not None
         ):
@@ -452,6 +503,7 @@ def _main():
                     dotfiles_config,
                     root,
                     rm_save_path or saved,
+                    selected_remove_systems,
                 ),
                 root,
             )
@@ -478,6 +530,7 @@ def _main():
         original_config = copy.deepcopy(dotfiles_config)
         share_state = None
         rm_save_path = None
+        selected_remove_systems = None
         saved = None
         if command == "add":
             install = operations.normalize_path(args["<install_path>"])
@@ -493,11 +546,17 @@ def _main():
             if error:
                 _fail(error)
             rel_path = os.path.relpath(rm_save_path, root).replace(os.sep, "/")
-            error = operations.validate_remove_destination(
-                dotfiles_config, rel_path, root, args.get("--force", False)
+            selected_remove_systems = _select_remove_systems(
+                args, dotfiles_config["dotfiles"].get(rel_path, {})
             )
-            if error:
-                _fail(error)
+            if selected_remove_systems is None:
+                return None
+            if operations.os_name() in selected_remove_systems:
+                error = operations.validate_remove_destination(
+                    dotfiles_config, rel_path, root, args.get("--force", False)
+                )
+                if error:
+                    _fail(error)
         elif command == "share" or (
             command == "install" and args.get("<save_path>") is not None
         ):
@@ -565,6 +624,7 @@ def _main():
                     dotfiles_config,
                     root,
                     rm_save_path or saved,
+                    selected_remove_systems,
                 ),
                 root,
             )
@@ -586,6 +646,7 @@ def _main():
                 args.get("--force", False),
                 args.get("--all", False),
                 rm_save_path,
+                selected_systems=selected_remove_systems,
             )
         elif command == "install":
             result = operations.install(
@@ -608,7 +669,8 @@ def _main():
         else:
             result = operations.view(dotfiles_config, root, args.get("--force", False))
         if command != "view" and (
-            command != "share" or result.config != original_config
+            (command != "share" or result.config != original_config)
+            and (command != "rm" or result.config != original_config)
         ):
             config.save_config(root, result.config)
         return result

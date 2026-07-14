@@ -315,6 +315,129 @@ def test_docopt_parses_rm_all():
     assert args["--all"] is True
 
 
+def test_remove_selector_lists_registered_systems_and_defaults_current(monkeypatch):
+    monkeypatch.setattr(cli.operations, "os_name", lambda: "linux")
+    monkeypatch.setattr(cli.sys, "stdin", SimpleNamespace(isatty=lambda: True))
+    prompt = Mock(return_value={"systems": ["custom", "darwin"]})
+    monkeypatch.setattr(cli, "_prompt_targets", prompt)
+
+    selected = cli._select_remove_systems(
+        _args("rm"), {"linux": {}, "darwin": {}, "custom": {}}
+    )
+
+    assert selected == {"darwin", "custom"}
+    checkbox = prompt.call_args.args[0][0]
+    assert checkbox.message == "Select systems to remove"
+    assert checkbox.default == ["linux"]
+    assert [(choice.label, choice.value) for choice in checkbox.choices] == [
+        ("Linux", "linux"),
+        ("macOS", "darwin"),
+        ("custom", "custom"),
+    ]
+
+
+def test_remove_selector_cancellation_and_empty_selection_are_distinct(monkeypatch):
+    monkeypatch.setattr(cli.operations, "os_name", lambda: "linux")
+    monkeypatch.setattr(cli.sys, "stdin", SimpleNamespace(isatty=lambda: True))
+    prompt = Mock(side_effect=[None, {"systems": []}])
+    monkeypatch.setattr(cli, "_prompt_targets", prompt)
+
+    assert cli._select_remove_systems(_args("rm"), {"linux": {}}) is None
+    assert cli._select_remove_systems(_args("rm"), {"linux": {}}) == set()
+
+
+def test_remove_selector_bypasses_prompt_for_non_tty_and_all(monkeypatch):
+    monkeypatch.setattr(cli.operations, "os_name", lambda: "linux")
+    prompt = Mock(side_effect=AssertionError("must not prompt"))
+    monkeypatch.setattr(cli, "_prompt_targets", prompt)
+    monkeypatch.setattr(cli.sys, "stdin", SimpleNamespace(isatty=lambda: False))
+
+    assert cli._select_remove_systems(_args("rm"), {"darwin": {}}) == {"linux"}
+    assert cli._select_remove_systems(
+        _args("rm", **{"--all": True}), {"linux": {}, "darwin": {}}
+    ) == {"linux", "darwin"}
+    prompt.assert_not_called()
+
+
+@pytest.mark.parametrize("dry_run", [False, True])
+def test_remove_foreign_selection_skips_current_preflight(monkeypatch, dry_run):
+    result = operations.OperationResult({"dotfiles": {}}, [])
+    dotfiles_config = {
+        "dotfiles": {"saved": {"linux": {"path": "/install"}, "custom": {}}}
+    }
+    monkeypatch.setattr(cli.operations, "os_name", lambda: "linux")
+    monkeypatch.setattr(
+        cli,
+        "docopt",
+        Mock(return_value=_args("rm", **{"<path>": "path", "--dry-run": dry_run})),
+    )
+    monkeypatch.setattr(cli.config, "default_dotfiles_root", Mock(return_value="/repo"))
+    monkeypatch.setattr(cli.config, "load_config", Mock(return_value=dotfiles_config))
+    monkeypatch.setattr(cli.operations, "validate_config", Mock(return_value=[]))
+    monkeypatch.setattr(cli.operations, "normalize_path", Mock(return_value="/path"))
+    monkeypatch.setattr(
+        cli.operations, "resolve_view_save_path", Mock(return_value="/repo/saved")
+    )
+    monkeypatch.setattr(cli.operations, "validate_remove", Mock(return_value=None))
+    destination = Mock(return_value=None)
+    monkeypatch.setattr(cli.operations, "validate_remove_destination", destination)
+    paths = Mock(return_value=None)
+    monkeypatch.setattr(cli.operations, "validate_mutation_paths", paths)
+    monkeypatch.setattr(cli, "_select_remove_systems", Mock(return_value={"custom"}))
+    remove = Mock(return_value=result)
+    monkeypatch.setattr(cli.operations, "remove", remove)
+    monkeypatch.setattr(cli.config, "save_config", Mock())
+
+    cli.main()
+
+    destination.assert_not_called()
+    paths.assert_called_once_with([], "/repo")
+    if dry_run:
+        remove.assert_not_called()
+    else:
+        assert remove.call_args.kwargs["selected_systems"] == {"custom"}
+
+
+@pytest.mark.parametrize("dry_run", [False, True])
+def test_remove_all_with_only_foreign_registration_validates_saved_path(
+    monkeypatch, dry_run
+):
+    result = operations.OperationResult({"dotfiles": {}}, [])
+    dotfiles_config = {"dotfiles": {"saved": {"darwin": {}}}}
+    monkeypatch.setattr(cli.operations, "os_name", lambda: "linux")
+    monkeypatch.setattr(
+        cli,
+        "docopt",
+        Mock(
+            return_value=_args(
+                "rm", **{"<path>": "path", "--all": True, "--dry-run": dry_run}
+            )
+        ),
+    )
+    monkeypatch.setattr(cli.config, "default_dotfiles_root", Mock(return_value="/repo"))
+    monkeypatch.setattr(cli.config, "load_config", Mock(return_value=dotfiles_config))
+    monkeypatch.setattr(cli.operations, "validate_config", Mock(return_value=[]))
+    monkeypatch.setattr(cli.operations, "normalize_path", Mock(return_value="/path"))
+    monkeypatch.setattr(
+        cli.operations, "resolve_view_save_path", Mock(return_value="/repo/saved")
+    )
+    monkeypatch.setattr(cli.operations, "validate_remove", Mock(return_value=None))
+    paths = Mock(return_value=None)
+    monkeypatch.setattr(cli.operations, "validate_mutation_paths", paths)
+    monkeypatch.setattr(cli, "_select_remove_systems", Mock(return_value={"darwin"}))
+    remove = Mock(return_value=result)
+    monkeypatch.setattr(cli.operations, "remove", remove)
+    monkeypatch.setattr(cli.config, "save_config", Mock())
+
+    cli.main()
+
+    paths.assert_called_once_with(["/repo/saved"], "/repo")
+    if dry_run:
+        remove.assert_not_called()
+    else:
+        remove.assert_called_once()
+
+
 @pytest.mark.parametrize(
     ("command", "values", "expected"),
     [
@@ -376,7 +499,13 @@ def test_main_dispatches_remaining_commands_and_saves(
             "/path", "/repo", "/path"
         )
         remove.assert_called_once_with(
-            *paths, dotfiles_config, "/repo", False, True, "/path"
+            *paths,
+            dotfiles_config,
+            "/repo",
+            False,
+            True,
+            "/path",
+            selected_systems=set(),
         )
         install.assert_not_called()
         share.assert_not_called()
@@ -391,7 +520,7 @@ def test_main_dispatches_remaining_commands_and_saves(
         )
         remove.assert_not_called()
         install.assert_not_called()
-    if command == "share":
+    if command == "share" or command == "rm":
         # A no-op/rejected share must not rewrite YAML.
         save.assert_not_called()
     else:

@@ -1136,6 +1136,145 @@ def test_remove_all_without_current_registration_never_touches_foreign_path(
     assert not saved.exists()
 
 
+def test_remove_selected_foreign_mappings_never_touches_install_paths(
+    tmp_path, monkeypatch
+):
+    repo = tmp_path / "repo"
+    saved = repo / "saved"
+    install = tmp_path / "home" / "install"
+    foreign = "/inaccessible/foreign/install"
+    repo.mkdir()
+    saved.write_text("saved")
+    install.parent.mkdir()
+    install.symlink_to(saved)
+    config = {
+        "dotfiles": {
+            "saved": {
+                "linux": {"path": str(install)},
+                "darwin": {"path": foreign},
+                "windows": {"path": "~/other"},
+            }
+        }
+    }
+    monkeypatch.setattr(operations, "os_name", lambda: "linux")
+    original_lexists = operations.os.path.lexists
+
+    def reject_foreign(path):
+        assert path != foreign
+        return original_lexists(path)
+
+    monkeypatch.setattr(operations.os.path, "lexists", reject_foreign)
+    result = operations.remove(
+        str(saved), config, str(repo), selected_systems={"darwin"}
+    )
+
+    assert result.config["dotfiles"]["saved"] == {
+        "linux": {"path": str(install)},
+        "windows": {"path": "~/other"},
+    }
+    assert saved.read_text() == "saved"
+    assert install.is_symlink()
+
+
+def test_remove_selected_last_foreign_mapping_deletes_saved_object(
+    tmp_path, monkeypatch
+):
+    repo = tmp_path / "repo"
+    saved = repo / "saved"
+    repo.mkdir()
+    saved.write_text("saved")
+    config = {"dotfiles": {"saved": {"darwin": {"path": "~/foreign"}}}}
+    monkeypatch.setattr(operations, "os_name", lambda: "linux")
+
+    result = operations.remove(
+        str(saved), config, str(repo), selected_systems={"darwin"}
+    )
+
+    assert result.config == {"dotfiles": {}}
+    assert not saved.exists()
+
+
+def test_remove_selected_current_and_foreign_mappings(tmp_path, monkeypatch):
+    repo = tmp_path / "repo"
+    saved = repo / "saved"
+    install = tmp_path / "home" / "install"
+    repo.mkdir()
+    saved.write_text("saved")
+    install.parent.mkdir()
+    install.symlink_to(saved)
+    monkeypatch.setattr(operations, "os_name", lambda: "linux")
+    config = {
+        "dotfiles": {
+            "saved": {
+                "linux": {"path": str(install)},
+                "darwin": {"path": "~/darwin"},
+                "windows": {"path": "~/windows"},
+            }
+        }
+    }
+
+    result = operations.remove(
+        str(saved), config, str(repo), selected_systems={"linux", "darwin"}
+    )
+
+    assert result.config["dotfiles"]["saved"] == {"windows": {"path": "~/windows"}}
+    assert saved.read_text() == "saved"
+    assert install.read_text() == "saved"
+
+
+def test_remove_selected_current_and_all_mappings_moves_saved_object(
+    tmp_path, monkeypatch
+):
+    repo = tmp_path / "repo"
+    saved = repo / "saved"
+    install = tmp_path / "home" / "install"
+    repo.mkdir()
+    saved.write_text("saved")
+    install.parent.mkdir()
+    install.symlink_to(saved)
+    monkeypatch.setattr(operations, "os_name", lambda: "linux")
+    config = {
+        "dotfiles": {
+            "saved": {
+                "linux": {"path": str(install)},
+                "darwin": {"path": "~/darwin"},
+            }
+        }
+    }
+
+    result = operations.remove(
+        str(saved), config, str(repo), selected_systems={"linux", "darwin"}
+    )
+
+    assert result.config == {"dotfiles": {}}
+    assert not saved.exists()
+    assert install.read_text() == "saved"
+
+
+@pytest.mark.parametrize("selected_systems", [set(), {"android"}])
+def test_remove_selected_empty_or_unknown_is_noop(
+    tmp_path, monkeypatch, selected_systems
+):
+    repo = tmp_path / "repo"
+    saved = repo / "saved"
+    install = tmp_path / "home" / "install"
+    repo.mkdir()
+    saved.write_text("saved")
+    install.parent.mkdir()
+    install.symlink_to(saved)
+    config = {"dotfiles": {"saved": {"linux": {"path": str(install)}}}}
+    monkeypatch.setattr(operations, "os_name", lambda: "linux")
+
+    result = operations.remove(
+        str(saved), config, str(repo), selected_systems=selected_systems
+    )
+
+    assert result.messages == []
+    assert result.config == config
+    assert saved.read_text() == "saved"
+    assert install.is_symlink()
+
+
 def test_remove_is_silent_when_current_system_is_not_registered(tmp_path, monkeypatch):
     repo = tmp_path / "repo"
     repo.mkdir()

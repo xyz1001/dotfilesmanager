@@ -782,23 +782,65 @@ def remove(
     force=False,
     all_platforms=False,
     resolved_save_path=None,
+    selected_systems=None,
 ):
-    """Remove a managed object, optionally using a pre-resolved saved path."""
+    """Remove selected registrations, optionally using a pre-resolved saved path."""
     abs_save_path = resolved_save_path or _remove_save_path(path, dotfiles_root)
     rel_save_path = os.path.relpath(abs_save_path, dotfiles_root).replace(
         os.sep, posixpath.sep
     )
-    install_path = get_path(config, rel_save_path)
-    if install_path is None:
-        if all_platforms and rel_save_path in config["dotfiles"]:
+    if all_platforms:
+        # Preserve the historical --all behavior, including its special case
+        # for entries without a current-platform registration.
+        install_path = get_path(config, rel_save_path)
+        if install_path is None:
+            if rel_save_path in config["dotfiles"]:
+                if os.path.islink(abs_save_path) or os.path.isfile(abs_save_path):
+                    os.unlink(abs_save_path)
+                else:
+                    shutil.rmtree(abs_save_path)
+                del config["dotfiles"][rel_save_path]
+                return OperationResult(config, [f"Remove {rel_save_path}"])
+            return OperationResult(config)
+
+        error = validate_remove_destination(config, rel_save_path, dotfiles_root, force)
+        if error:
+            raise ValueError(error)
+
+        if os.path.lexists(install_path):
+            if not os.path.islink(install_path) and not force:
+                raise ValueError(
+                    f"{install_path} is not a managed link; refusing to overwrite it"
+                )
+            if os.path.islink(install_path) or os.path.isfile(install_path):
+                os.unlink(install_path)
+            else:
+                shutil.rmtree(install_path)
+        del config["dotfiles"][rel_save_path][os_name()]
+        shutil.move(abs_save_path, install_path)
+        del config["dotfiles"][rel_save_path]
+        return OperationResult(config, [f"Remove {rel_save_path}"])
+
+    systems = config["dotfiles"].get(rel_save_path)
+    if systems is None:
+        return OperationResult(config)
+    current = os_name()
+    requested = {current} if selected_systems is None else set(selected_systems)
+    selected = requested.intersection(systems)
+    if not selected:
+        return OperationResult(config)
+    if current not in selected:
+        for system in selected:
+            del systems[system]
+        if not systems:
             if os.path.islink(abs_save_path) or os.path.isfile(abs_save_path):
                 os.unlink(abs_save_path)
             else:
                 shutil.rmtree(abs_save_path)
             del config["dotfiles"][rel_save_path]
-            return OperationResult(config, [f"Remove {rel_save_path}"])
-        return OperationResult(config)
+        return OperationResult(config, [f"Remove {rel_save_path}"])
 
+    install_path = get_path(config, rel_save_path)
     error = validate_remove_destination(config, rel_save_path, dotfiles_root, force)
     if error:
         raise ValueError(error)
@@ -812,8 +854,9 @@ def remove(
             os.unlink(install_path)
         else:
             shutil.rmtree(install_path)
-    del config["dotfiles"][rel_save_path][os_name()]
-    if config["dotfiles"][rel_save_path] and not all_platforms:
+    for system in selected:
+        del systems[system]
+    if systems:
         if os.path.isfile(abs_save_path):
             shutil.copy(abs_save_path, install_path)
         else:
