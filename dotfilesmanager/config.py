@@ -41,27 +41,6 @@ def save_config(dotfiles_root, config):
             os.unlink(temporary_path)
 
 
-def restore_config_bytes(dotfiles_root, contents, exists):
-    """Atomically restore the exact pre-transaction configuration bytes."""
-    path = os.path.join(dotfiles_root, "dfm.yaml")
-    if not exists:
-        if os.path.exists(path):
-            os.unlink(path)
-            _sync_directory(dotfiles_root)
-        return
-    fd, temporary_path = tempfile.mkstemp(prefix=".dfm.yaml.", dir=dotfiles_root)
-    try:
-        with os.fdopen(fd, "wb") as handle:
-            handle.write(contents)
-            handle.flush()
-            os.fsync(handle.fileno())
-        os.replace(temporary_path, path)
-        _sync_directory(dotfiles_root)
-    finally:
-        if os.path.exists(temporary_path):
-            os.unlink(temporary_path)
-
-
 def _sync_directory(path):
     """Flush a rename's directory entry when the platform permits it."""
     try:

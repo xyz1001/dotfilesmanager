@@ -9,18 +9,18 @@ import inquirer
 from docopt import docopt
 from inquirer.errors import ValidationError
 
-from . import config, operations, transaction, windows
+from . import config, operations, windows
 
 USAGE = """
 dotfile管理工具(dotfiles manager)，dotfile指保存配置信息的文件或包含配置文件的文件夹
 
 Usage:
-    dfm add <install_path> [--system] [--non-interactive] [--target=<mapping>...] [--dry-run] [--force] [--backup]
-    dfm rm <path> [--all] [--dry-run] [--force] [--backup]
-    dfm install [<save_path>] [--dry-run] [--force] [--backup]
-    dfm share <save_path> <install_path> [--non-interactive] [--target=<mapping>...] [--dry-run] [--force] [--backup]
-    dfm view [--dry-run] [--force] [--backup]
-    dfm doctor [--repair]
+    dfm add <install_path> [--system] [--non-interactive] [--target=<mapping>...] [--dry-run] [--force]
+    dfm rm <path> [--all] [--dry-run] [--force]
+    dfm install [<save_path>] [--dry-run] [--force]
+    dfm share <save_path> <install_path> [--non-interactive] [--target=<mapping>...] [--dry-run] [--force]
+    dfm view [--dry-run] [--force]
+    dfm doctor
     dfm setup
 
 Options:
@@ -30,9 +30,7 @@ Options:
     --target=<mapping>  Foreign target mapping, repeated as SYSTEM=~/path.
     --dry-run  Validate and show what would be changed without writing.
     --force    Do not ask before replacing an existing path.
-    --backup   Keep the transaction's pre-change backups after commit.
     --all      Remove registrations for every platform.
-    --repair   Recover an interrupted transaction.
 """
 
 
@@ -154,7 +152,7 @@ def _target_wizard(install_path, configured, dry_run=False):
 
 
 def _select_targets(args, command, install_path, dotfiles_config, root, dry_run):
-    """Validate/collect targets before a transaction is opened."""
+    """Validate/collect targets before a direct mutation."""
     supplied = args.get("--target", []) or []
     # The default preserves direct callers which predate these docopt keys.
     non_interactive = args.get("--non-interactive", True)
@@ -196,7 +194,7 @@ def _select_targets(args, command, install_path, dotfiles_config, root, dry_run)
 
 
 def _preconfirm_install(abs_save_path, dotfiles_config, root, force):
-    """Collect every install replacement decision before opening a transaction."""
+    """Collect every install replacement decision before mutation."""
     selected = None
     if abs_save_path is not None:
         selected = os.path.relpath(abs_save_path, root).replace(os.sep, "/")
@@ -214,7 +212,7 @@ def _preconfirm_install(abs_save_path, dotfiles_config, root, force):
     return approved
 
 
-def _mutation_paths(command, args, dotfiles_config, root, resolved_save_path=None):
+def _direct_paths(command, args, dotfiles_config, root, resolved_save_path=None):
     """Return direct paths each operation may replace, move, or unlink."""
     if command == "add":
         install = operations.normalize_path(args["<install_path>"])
@@ -257,85 +255,43 @@ def _mutation_paths(command, args, dotfiles_config, root, resolved_save_path=Non
     return paths
 
 
-def _doctor(root, repair):
-    with transaction.ProcessLock(root):
-        problems = []
-        repair_links = []
-        try:
-            pending = transaction.inspect(root)
-        except transaction.JournalError as error:
-            problems.append(f"Invalid pending transaction: {error}")
-            pending = None
-        if pending:
-            if repair:
-                try:
-                    transaction.recover(root)
-                    print("Recovered pending transaction")
-                except (OSError, transaction.JournalError) as error:
-                    problems.append(f"Could not recover pending transaction: {error}")
-            else:
-                problems.append("Pending transaction found; run dfm doctor --repair")
-        try:
-            dotfiles_config = config.load_config(root)
-            problems.extend(operations.validate_config(dotfiles_config, root))
-            if not problems:
-                for rel_path in dotfiles_config["dotfiles"]:
-                    saved = os.path.join(root, rel_path.replace("/", os.sep))
-                    if not os.path.lexists(saved):
-                        problems.append(f"missing saved path: {rel_path}")
-                    install = operations.get_path(dotfiles_config, rel_path)
-                    if not install:
-                        continue
-                    if not os.path.lexists(install):
-                        problems.append(f"missing install link: {install}")
-                        if os.path.isfile(saved) or os.path.isdir(saved):
-                            repair_links.append((saved, install))
-                    elif not os.path.islink(install):
-                        problems.append(f"install path is not a link: {install}")
-                    else:
-                        target = os.readlink(install)
-                        if not os.path.isabs(target):
-                            target = os.path.join(os.path.dirname(install), target)
-                        if os.path.abspath(os.path.normpath(target)) != os.path.abspath(
-                            os.path.normpath(saved)
-                        ):
-                            problems.append(f"wrong install link: {install}")
-                            if os.path.isfile(saved) or os.path.isdir(saved):
-                                repair_links.append((saved, install))
-                        elif not os.path.exists(install):
-                            problems.append(f"dangling install link: {install}")
-                problems.extend(_unreferenced_saved_objects(root, dotfiles_config))
-        except Exception as error:
-            problems.append(f"Invalid configuration: {error}")
-        repairable = [
-            problem
-            for problem in problems
-            if problem.startswith("missing install link:")
-            or problem.startswith("wrong install link:")
-        ]
-        nonrepairable = [problem for problem in problems if problem not in repairable]
-        if repair and repair_links and not nonrepairable:
-            tx = transaction.Transaction(root, [link for _, link in repair_links])
-            tx.begin()
-            try:
-                for saved, link in repair_links:
-                    os.makedirs(os.path.dirname(link), exist_ok=True)
-                    if os.path.lexists(link):
-                        os.unlink(link)
-                    windows.create_symlink(
-                        saved, link, target_is_directory=os.path.isdir(saved)
-                    )
-                tx.commit()
-                print(f"Recreated {len(repair_links)} install link(s)")
-                return
-            except Exception:
-                tx.rollback()
-                raise
-        if problems:
-            for problem in problems:
-                print(problem)
-            raise SystemExit(-1)
-        print("No transaction or configuration problems found")
+def _doctor(root):
+    problems = []
+    if not os.path.isdir(root):
+        _fail(f"dotfiles root does not exist: {root}")
+    try:
+        dotfiles_config = config.load_config(root)
+        problems.extend(operations.validate_config(dotfiles_config, root))
+        if not problems:
+            for rel_path in dotfiles_config["dotfiles"]:
+                saved = os.path.join(root, rel_path.replace("/", os.sep))
+                if not os.path.lexists(saved):
+                    problems.append(f"missing saved path: {rel_path}")
+                install = operations.get_path(dotfiles_config, rel_path)
+                if not install:
+                    continue
+                if not os.path.lexists(install):
+                    problems.append(f"missing install link: {install}")
+                elif not os.path.islink(install):
+                    problems.append(f"install path is not a link: {install}")
+                else:
+                    target = os.readlink(install)
+                    if not os.path.isabs(target):
+                        target = os.path.join(os.path.dirname(install), target)
+                    if os.path.abspath(os.path.normpath(target)) != os.path.abspath(
+                        os.path.normpath(saved)
+                    ):
+                        problems.append(f"wrong install link: {install}")
+                    elif not os.path.exists(install):
+                        problems.append(f"dangling install link: {install}")
+            problems.extend(_unreferenced_saved_objects(root, dotfiles_config))
+    except Exception as error:
+        problems.append(f"Invalid configuration: {error}")
+    if problems:
+        for problem in problems:
+            print(problem)
+        raise SystemExit(-1)
+    print("No configuration problems found")
 
 
 def _unreferenced_saved_objects(root, dotfiles_config):
@@ -373,7 +329,8 @@ def main():
     except windows.SymlinkPrivilegeError:
         _fail(
             "Windows could not create a symbolic link because the required "
-            "privilege is not held. Run dfm setup, then retry."
+            "privilege is not held. Run dfm setup, then inspect and repair any "
+            "partially applied state before retrying."
         )
 
 
@@ -387,7 +344,7 @@ def _main():
         return
     root = config.default_dotfiles_root()
     if args.get("doctor"):
-        _doctor(root, args.get("--repair", False))
+        _doctor(root)
         return
     command = next(
         name for name in ("add", "rm", "install", "share", "view") if args.get(name)
@@ -410,8 +367,7 @@ def _main():
             _fail("add/share require --non-interactive when stdin is not a TTY")
     dry_run = args.get("--dry-run", False)
     if dry_run:
-        # Validation is deliberately done below; no lock is taken because even
-        # creating its lock file would violate the zero-write contract.
+        # Validation below is deliberately read-only to preserve zero writes.
         dotfiles_config = config.load_config(root)
         errors = operations.validate_config(dotfiles_config, root)
         if errors:
@@ -421,11 +377,14 @@ def _main():
                 operations.plan_view(dotfiles_config, root)
             except ValueError as error:
                 _fail(str(error))
-            error = operations.validate_view_root(root, args.get("--force", False))
+            error = operations.validate_view_mutation_root(
+                root
+            ) or operations.validate_view_root(root, args.get("--force", False))
             if error:
                 _fail(error)
             print(f"Dry-run: {command}; no changes made")
             return
+        rm_save_path = None
         if command == "add":
             install = operations.normalize_path(args["<install_path>"])
             error = operations.validate_add(install, args.get("--system", False), root)
@@ -480,12 +439,16 @@ def _main():
             )
             if error:
                 _fail(error)
+        if command != "view":
+            error = operations.validate_mutation_paths(
+                _direct_paths(command, args, dotfiles_config, root, rm_save_path), root
+            )
+            if error:
+                _fail(error)
         print(f"Dry-run: {command}; no changes made")
         return
 
-    with transaction.ProcessLock(root):
-        # Always recover before reading config or allowing a mutation.
-        transaction.recover(root)
+    def run_direct():
         dotfiles_config = config.load_config(root)
         errors = operations.validate_config(dotfiles_config, root)
         if errors:
@@ -495,7 +458,9 @@ def _main():
                 operations.plan_view(dotfiles_config, root)
             except ValueError as error:
                 _fail(str(error))
-            error = operations.validate_view_root(root, args.get("--force", False))
+            error = operations.validate_view_mutation_root(
+                root
+            ) or operations.validate_view_root(root, args.get("--force", False))
             if error:
                 _fail(error)
         original_config = copy.deepcopy(dotfiles_config)
@@ -565,9 +530,7 @@ def _main():
                 root,
                 args.get("--force", False),
             )
-        # Share must not even rewrite YAML when the user declines replacement.
-        # Prompt before opening a transaction so a declined operation is a true
-        # no-op (apart from the read/validation above).
+        # Share must not rewrite YAML when the user declines replacement.
         if command == "share":
             share_install = operations.normalize_path(args["<install_path>"])
             share_state = operations._link_state(saved, share_install)
@@ -577,66 +540,58 @@ def _main():
                         "existing install path requires --force in non-interactive mode"
                     )
                 if not _confirm_replace(share_install):
-                    return
+                    return None
 
-        tx = transaction.Transaction(
-            root,
-            _mutation_paths(command, args, dotfiles_config, root, rm_save_path),
-            args.get("--backup", False),
-        )
-        tx.begin()
+        if command != "view":
+            error = operations.validate_mutation_paths(
+                _direct_paths(command, args, dotfiles_config, root, rm_save_path), root
+            )
+            if error:
+                _fail(error)
 
-        # All confirmation happened above, before tx.begin().
         def confirm(_):
             return True
 
-        try:
-            if command == "add":
-                result = operations.add(
-                    install, args.get("--system", False), dotfiles_config, root, targets
-                )
-            elif command == "rm":
-                result = operations.remove(
-                    path,
-                    dotfiles_config,
-                    root,
-                    args.get("--force", False),
-                    args.get("--all", False),
-                    rm_save_path,
-                )
-            elif command == "install":
-                result = operations.install(
-                    operations.normalize_path(args.get("<save_path>")),
-                    dotfiles_config,
-                    root,
-                    confirm,
-                    install_approved,
-                )
-            elif command == "share":
-                result = operations.share(
-                    operations.normalize_path(args["<save_path>"]),
-                    operations.normalize_path(args["<install_path>"]),
-                    dotfiles_config,
-                    root,
-                    confirm,
-                    targets,
-                    share_state,
-                )
-            else:
-                result = operations.view(
-                    dotfiles_config, root, args.get("--force", False)
-                )
-            if command != "view" and (
-                command != "share" or result.config != original_config
-            ):
-                config.save_config(root, result.config)
-            tx.commit()
-        except Exception:
-            # If restoration itself fails the journal remains for doctor/next run.
-            try:
-                tx.rollback()
-            except Exception:
-                pass
-            raise
-    # A message means both filesystem and YAML changes crossed the commit point.
+        if command == "add":
+            result = operations.add(
+                install, args.get("--system", False), dotfiles_config, root, targets
+            )
+        elif command == "rm":
+            result = operations.remove(
+                path,
+                dotfiles_config,
+                root,
+                args.get("--force", False),
+                args.get("--all", False),
+                rm_save_path,
+            )
+        elif command == "install":
+            result = operations.install(
+                operations.normalize_path(args.get("<save_path>")),
+                dotfiles_config,
+                root,
+                confirm,
+                install_approved,
+            )
+        elif command == "share":
+            result = operations.share(
+                operations.normalize_path(args["<save_path>"]),
+                operations.normalize_path(args["<install_path>"]),
+                dotfiles_config,
+                root,
+                confirm,
+                targets,
+                share_state,
+            )
+        else:
+            result = operations.view(dotfiles_config, root, args.get("--force", False))
+        if command != "view" and (
+            command != "share" or result.config != original_config
+        ):
+            config.save_config(root, result.config)
+        return result
+
+    result = run_direct()
+    if result is None:
+        return
     _render(result)

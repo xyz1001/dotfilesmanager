@@ -34,10 +34,7 @@ VIEW_DIRECTORY = "view"
 SUPPORTED_SYSTEMS = ("linux", "darwin", "windows", "android")
 _VIEW_EXCLUDED = (
     VIEW_DIRECTORY,
-    ".dfm-transaction.yaml",
-    ".dfm-backups",
     "dfm.yaml",
-    ".dfm.lock",
     ".git",
 )
 
@@ -140,6 +137,62 @@ def _is_within(path, directory):
         return False
 
 
+def _same_path(left, right):
+    path_module = ntpath if os_name() == "windows" else os.path
+    return path_module.normcase(path_module.abspath(left)) == path_module.normcase(
+        path_module.abspath(right)
+    )
+
+
+def validate_mutation_paths(paths, dotfiles_root):
+    """Reject protected targets and existing symlink parents before mutation."""
+    root = os.path.abspath(dotfiles_root)
+    if os.path.lexists(root) and _is_link_or_reparse(root):
+        return f"{root} is a symbolic-link or reparse-point root"
+    protected = (
+        root,
+        os.path.join(root, "dfm.yaml"),
+        os.path.join(root, VIEW_DIRECTORY),
+    )
+    for path in paths:
+        if not path:
+            continue
+        path = os.path.abspath(path)
+        if _same_path(path, root) or any(
+            _same_path(path, item) or _is_within(path, item) for item in protected[1:]
+        ):
+            return f"{path} targets protected dotfiles state"
+        parent = os.path.dirname(path)
+        while parent and parent != os.path.dirname(parent):
+            if os.path.lexists(parent) and _is_link_or_reparse(parent):
+                return f"{path} has a symbolic-link parent"
+            if parent == root:
+                break
+            parent = os.path.dirname(parent)
+    return None
+
+
+def _is_link_or_reparse(path):
+    if os.path.islink(path):
+        return True
+    if os_name() != "windows" or not os.path.lexists(path):
+        return False
+    return bool(getattr(os.lstat(path), "st_file_attributes", 0) & 0x400)
+
+
+def validate_view_mutation_root(dotfiles_root):
+    """Ensure rebuilding view cannot traverse a substituted root or parent."""
+    root = os.path.abspath(dotfiles_root)
+    if os.path.lexists(root) and _is_link_or_reparse(root):
+        return f"{root} is a symbolic-link or reparse-point root"
+    parent = os.path.dirname(root)
+    while parent and parent != os.path.dirname(parent):
+        if os.path.lexists(parent) and _is_link_or_reparse(parent):
+            return f"{root} has a symbolic-link or reparse-point parent"
+        parent = os.path.dirname(parent)
+    return None
+
+
 def validate_add(install_path, system, dotfiles_root):
     if not os.path.isfile(install_path) and not os.path.isdir(install_path):
         return f"{install_path} is not valid file or directory"
@@ -183,7 +236,9 @@ def validate_config(config, dotfiles_root):
         saved = os.path.abspath(
             os.path.join(dotfiles_root, rel_path.replace("/", os.sep))
         )
-        if not _is_within(saved, dotfiles_root):
+        if _same_path(saved, dotfiles_root):
+            errors.append("saved path cannot be dotfiles root")
+        elif not _is_within(saved, dotfiles_root):
             errors.append("saved path escapes dotfiles root")
         elif _is_view_filesystem_path(
             os.path.relpath(saved, dotfiles_root)
@@ -795,7 +850,7 @@ def _current_paths_equal(first, second):
 
 
 def validate_share_state(abs_save_path, install_path, config, dotfiles_root):
-    """Return an error for an immutable current mapping before a transaction."""
+    """Return an error for an immutable current mapping before mutation."""
     rel_save_path = os.path.relpath(abs_save_path, dotfiles_root).replace(
         os.sep, posixpath.sep
     )

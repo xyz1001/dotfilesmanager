@@ -2,10 +2,48 @@
 
 import hashlib
 import os
+from types import SimpleNamespace
 
 import pytest
 
 from dotfilesmanager import operations
+
+
+def test_mutation_validation_rejects_windows_reparse_root(tmp_path, monkeypatch):
+    root = tmp_path / "root"
+    root.mkdir()
+    status = os.lstat(root)
+    monkeypatch.setattr(operations, "os_name", lambda: "windows")
+    monkeypatch.setattr(operations.os.path, "islink", lambda _: False)
+    monkeypatch.setattr(
+        operations.os,
+        "lstat",
+        lambda _: SimpleNamespace(st_mode=status.st_mode, st_file_attributes=0x400),
+    )
+    assert "reparse-point root" in operations.validate_mutation_paths(
+        [str(tmp_path / "outside")], str(root)
+    )
+    assert "reparse-point root" in operations.validate_view_mutation_root(str(root))
+
+
+@pytest.mark.parametrize("key", [".", "foo/.."])
+def test_config_rejects_saved_key_normalizing_to_root_on_windows(
+    tmp_path, monkeypatch, key
+):
+    monkeypatch.setattr(operations, "os_name", lambda: "windows")
+    config = {"dotfiles": {key: {}}}
+    assert "saved path cannot be dotfiles root" in operations.validate_config(
+        config, str(tmp_path / "DotFiles")
+    )
+
+
+def test_windows_case_equivalent_root_is_protected_mutation_path(tmp_path, monkeypatch):
+    root = tmp_path / "DotFiles"
+    monkeypatch.setattr(operations, "os_name", lambda: "windows")
+    variant = str(root).replace("DotFiles", "dotfiles")
+    assert "protected dotfiles state" in operations.validate_mutation_paths(
+        [variant], str(root)
+    )
 
 
 def _config(rel_path, install_path, system="linux"):
