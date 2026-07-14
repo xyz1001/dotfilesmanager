@@ -426,6 +426,32 @@ def test_install_replaces_file_directory_or_dangling_link_only_when_confirmed(
     assert installed.messages == [f"Install saved -> {install_path}"]
 
 
+@pytest.mark.parametrize("relative", [False, True])
+def test_install_keeps_correct_absolute_or_relative_link_without_confirmation(
+    tmp_path, monkeypatch, relative
+):
+    repo = tmp_path / "repo"
+    home = tmp_path / "home"
+    repo.mkdir()
+    home.mkdir()
+    saved = repo / "saved"
+    install_path = home / "target"
+    saved.write_text("saved")
+    target = os.path.relpath(saved, install_path.parent) if relative else str(saved)
+    install_path.symlink_to(target)
+    monkeypatch.setattr(operations, "os_name", lambda: "linux")
+
+    result = operations.install(
+        str(saved),
+        _config("saved", install_path),
+        str(repo),
+        lambda _: pytest.fail("correct link must not request confirmation"),
+    )
+
+    assert result.messages == []
+    assert os.readlink(install_path) == target
+
+
 def test_share_handles_known_unknown_and_rejected_replacement(tmp_path, monkeypatch):
     repo = tmp_path / "repo"
     repo.mkdir()

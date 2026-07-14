@@ -211,3 +211,29 @@ def test_install_rejects_destination_race_without_overwriting(tmp_path, monkeypa
         cli.main()
 
     assert install.read_text() == "raced"
+
+
+@pytest.mark.parametrize("relative", [False, True])
+def test_direct_install_keeps_correct_link_without_prompt_or_output(
+    tmp_path, monkeypatch, capsys, relative
+):
+    home, root = _environment(tmp_path, monkeypatch)
+    root.mkdir()
+    saved = root / "saved"
+    install = home / ".installed"
+    saved.write_text("saved")
+    target = os.path.relpath(saved, install.parent) if relative else str(saved)
+    install.symlink_to(target)
+    config.save_config(
+        str(root), {"dotfiles": {"saved": {"linux": {"path": str(install)}}}}
+    )
+    monkeypatch.setattr(
+        cli,
+        "_confirm_replace",
+        lambda _: pytest.fail("correct link must not request confirmation"),
+    )
+
+    _run(monkeypatch, "install", saved)
+
+    assert os.readlink(install) == target
+    assert "Install" not in capsys.readouterr().out

@@ -805,13 +805,14 @@ def install(abs_save_path, config, dotfiles_root, confirm_replace, accepted=None
         candidates.append((item_rel_save_path, item_abs_save_path, item_install_path))
     approved = []
     for item_rel_save_path, item_abs_save_path, item_install_path in candidates:
+        state = _link_state(item_abs_save_path, item_install_path)
+        # An existing link to this exact saved object is already installed.
+        # Keep it intact, including its relative target representation.
+        if state == "correct":
+            continue
         if accepted is not None and item_rel_save_path not in accepted:
             continue
-        if (
-            accepted is not None
-            and _link_state(item_abs_save_path, item_install_path)
-            != accepted[item_rel_save_path]
-        ):
+        if accepted is not None and state != accepted[item_rel_save_path]:
             raise ValueError("install path changed after install preflight")
         if not os.path.lexists(item_install_path) or confirm_replace(item_install_path):
             approved.append((item_rel_save_path, item_abs_save_path, item_install_path))

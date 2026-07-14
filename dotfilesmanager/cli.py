@@ -207,6 +207,8 @@ def _preconfirm_install(abs_save_path, dotfiles_config, root, force):
             continue
         saved = os.path.join(root, rel_path.replace("/", os.sep))
         state = operations._link_state(saved, install)
+        if state == "correct":
+            continue
         if state == "missing" or force or _confirm_replace(install):
             approved[rel_path] = state
     return approved
