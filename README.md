@@ -54,16 +54,29 @@ dfm doctor [--repair]
 也必须显式使用该选项。目标不能是当前平台，必须是以 `/` 分隔且位于 home 下的
 `~/...` 路径，不能包含 `..`、home 本身或 `~/dotfiles`。已存在的同一路径声明是
 幂等的，不同路径永不被 `--force` 覆盖。TTY 向导先以复选框显示可用平台（Linux、
-macOS、Windows、Android (Termux)），再按固定平台顺序为所选项提供相同 home 相对路径、对
-`~/.config/<app>` 的 Windows/macOS 约定候选、定制路径和跳过选项；默认跳过，
+macOS、Windows、Android (Termux)），再按固定平台顺序提供可直接使用的路径。对于
+CONFIG/DATA 来源会按当前类别生成候选：macOS 首先提供 Unix 路径（CONFIG 为
+`~/.config/...`，DATA 为 `~/.local/share/...`），再提供 Application Support；Windows
+提供 Roaming（CONFIG）/Local（DATA）AppData 路径。只有未分类来源只显示原路径；已分类的
+重定向来源仍获得固定模板建议，目标重定向请使用定制路径；列表只含
+路径候选和 Custom path，默认选择第一个建议路径。Custom path 留空或只输入空白会返回该系统的
+路径选择。
 最终确认默认否。`--dry-run` 保留路径选择但跳过最终确认；非交互 dry-run 不读取
 stdin。
+
+建议按**当前来源类别**生成：当前机器的 XDG/AppData 配置和数据根目录用于识别来源；
+日志路径始终不转换；缓存/状态仅在其根目录能与 CONFIG/DATA 区分时不转换。macOS
+Application Support 和 Windows Local 的缓存/状态别名无法按路径区分，仍按 DATA 转换。
+目标机器始终使用固定的 home 相对模板。macOS 的 Unix CONFIG/DATA 候选排在首位，因而也是
+默认值；Windows 配置首选 Roaming AppData，DATA 使用 Local。
+来源在重定向根目录下时，最后的直接路径只是回退建议，目标重定向必须使用 Custom path。
 
 Android（包括 Termux）使用唯一的 YAML 键 `android`。检测到 Android 时不会读取或
 回退到 `linux` 映射；不会创建 `termux` 平台键。**先备份并提交 dotfiles 仓库**：保留
 真实 Linux 机器共享使用的 `linux` 映射，同时在 Android 上添加 `android` 映射；仅将
 旧 Termux 专用的 `linux` 平台映射和平台专用 `linux` 保存对象手动重新登记或迁移。
-向导中 Android 始终显示为 **Android (Termux)**，只提供相同 home 相对路径候选。
+向导中 Android 始终显示为 **Android (Termux)**，并使用 Unix CONFIG/DATA 模板；
+未分类路径只保留直接候选。
 
 `share` 会先核对当前平台登记和本地链接：缺少登记但已有正确链接时只补登记；
 登记和正确链接都存在时为 no-op；缺链接时重建。普通文件、目录或错误链接只能在

@@ -167,7 +167,7 @@ def test_platform_specific_share_rejects_target_without_running_wizard(monkeypat
     wizard.assert_not_called()
 
 
-def test_target_wizard_adapter_choices_custom_skip_confirmation_and_dry_run(
+def test_target_wizard_adapter_choices_custom_retry_confirmation_and_dry_run(
     monkeypatch, capsys
 ):
     monkeypatch.setattr(cli.operations, "os_name", lambda: "linux")
@@ -195,9 +195,17 @@ def test_target_wizard_adapter_choices_custom_skip_confirmation_and_dry_run(
         ("Android (Termux)", "android"),
     ]
     path_list = prompts.call_args_list[1].args[0][0]
-    assert path_list.default == cli._SKIP
+    assert path_list.message == "Target path for macOS"
+    assert path_list.default == "~/.config/app"
+    assert [(choice.label, choice.value) for choice in path_list.choices] == [
+        ("~/.config/app", "~/.config/app"),
+        ("~/Library/Application Support/app", "~/Library/Application Support/app"),
+        ("Custom path", cli._CUSTOM),
+    ]
     validator = prompts.call_args_list[3].args[0][0]._validate
+    assert prompts.call_args_list[3].args[0][0].message == "Custom path for Windows"
     assert validator({}, "~/custom") is True
+    assert validator({}, "   ") is True
     with pytest.raises(cli.ValidationError):
         validator({}, "not-home")
 
@@ -207,9 +215,24 @@ def test_target_wizard_adapter_choices_custom_skip_confirmation_and_dry_run(
     confirm = prompts.call_args_list[4].args[0][0]
     assert confirm.default is False
 
-    prompts = Mock(side_effect=[{"systems": ["darwin"]}, {"path": cli._SKIP}])
+    prompts = Mock(
+        side_effect=[
+            {"systems": ["darwin", "windows"]},
+            {"path": "~/item"},
+            {"path": cli._CUSTOM},
+            {"custom_path": "   "},
+            {"path": "~/item"},
+            {"confirm": True},
+        ]
+    )
     monkeypatch.setattr(cli, "_prompt_targets", prompts)
-    assert cli._target_wizard("~/item", {}) == {}
+    assert cli._target_wizard("~/item", {}) == {
+        "darwin": "~/item",
+        "windows": "~/item",
+    }
+    retried_list = prompts.call_args_list[4].args[0][0]
+    assert retried_list.default == "~/item"
+    assert retried_list.message == "Target path for Windows"
 
     monkeypatch.setattr(cli, "_prompt_targets", Mock(return_value=None))
     assert cli._target_wizard("~/item", {}) is None

@@ -15,6 +15,10 @@ import sys
 from dataclasses import dataclass, field
 from stat import S_ISDIR
 
+from platformdirs.macos import MacOS
+from platformdirs.unix import Unix
+from platformdirs.windows import Windows
+
 
 @dataclass
 class OperationResult:
@@ -435,23 +439,139 @@ def _wizard_source_path(install_path):
     return str(install_path).replace("\\", "/")
 
 
-def target_candidates(install_path, system):
-    """Pure candidate labels and paths for the line-oriented CLI wizard."""
-    source = _wizard_source_path(install_path)
-    result = [("same home-relative path", source)]
-    parts = source.split("/")
-    if len(parts) >= 3 and parts[:2] == ["~", ".config"]:
-        suffix = "/".join(parts[2:])
-        if system == "windows":
-            result.append(("Windows AppData convention", "~/AppData/Roaming/" + suffix))
-        elif system == "darwin":
-            result.append(
-                (
-                    "macOS Application Support convention",
-                    "~/Library/Application Support/" + suffix,
-                )
+_CATEGORY_ORDER = ("config", "data")
+_UNIX_BASES = {
+    "config": "~/.config",
+    "data": "~/.local/share",
+}
+_MACOS_BASES = {
+    "config": "~/Library/Application Support",
+    "data": "~/Library/Application Support",
+}
+_WINDOWS_BASES = {
+    "config": "~/AppData/Roaming",
+    "data": "~/AppData/Local",
+}
+
+
+def _current_category_roots():
+    """Read public category roots only for the current source classification."""
+    current = os_name()
+    if current in ("linux", "android"):
+        provider = Unix(appname=None, ensure_exists=False)
+        return {
+            "config": provider.user_config_dir,
+            "data": provider.user_data_dir,
+        }
+    if current == "darwin":
+        provider = MacOS(appname=None, ensure_exists=False)
+        return {
+            "config": provider.user_config_dir,
+            "data": provider.user_data_dir,
+        }
+    if current == "windows":
+        roaming = Windows(appname=None, roaming=True, ensure_exists=False)
+        local = Windows(appname=None, roaming=False, ensure_exists=False)
+        return {
+            "config": roaming.user_config_dir,
+            "data": local.user_data_dir,
+        }
+    return {}
+
+
+def _current_direct_only_roots():
+    """Current roots that must not be mistaken for a CONFIG/DATA descendant."""
+    current = os_name()
+    if current in ("linux", "android"):
+        provider = Unix(appname=None, ensure_exists=False)
+        return (provider.user_cache_dir, provider.user_state_dir, provider.user_log_dir)
+    if current == "darwin":
+        provider = MacOS(appname=None, ensure_exists=False)
+        return (provider.user_cache_dir, provider.user_log_dir)
+    if current == "windows":
+        return (Windows(appname=None, roaming=False, ensure_exists=False).user_log_dir,)
+    return ()
+
+
+def _classify_source_categories(install_path):
+    """Return longest matching current-provider categories and source suffix."""
+    module = ntpath if os_name() == "windows" else os.path
+    source = module.normcase(module.normpath(normalize_path(install_path)))
+    for root in _current_direct_only_roots():
+        normalized_root = module.normcase(module.normpath(root))
+        try:
+            if module.commonpath((source, normalized_root)) == normalized_root:
+                return (), None
+        except ValueError:
+            continue
+    matches = []
+    for category, root in _current_category_roots().items():
+        normalized_root = module.normcase(module.normpath(root))
+        try:
+            contained = module.commonpath((source, normalized_root)) == normalized_root
+        except ValueError:
+            contained = False
+        if contained:
+            matches.append((category, normalized_root))
+    if not matches:
+        return (), None
+    longest = max(len(root) for _, root in matches)
+    selected = [(category, root) for category, root in matches if len(root) == longest]
+    categories = tuple(
+        category
+        for category in _CATEGORY_ORDER
+        if any(category == item[0] for item in selected)
+    )
+    suffix = module.relpath(source, selected[0][1]).replace("\\", "/")
+    return categories, "" if suffix == "." else suffix
+
+
+def _standard_target_path(system, category, suffix):
+    """Use private append helpers with deterministic literal target bases."""
+    if system in ("linux", "android"):
+        return (
+            Unix(appname=suffix or None, ensure_exists=False)
+            ._append_app_name_and_version(_UNIX_BASES[category])
+            .replace("\\", "/")
+        )
+    if system == "darwin":
+        return (
+            MacOS(appname=suffix or None, ensure_exists=False)
+            ._append_app_name_and_version(_MACOS_BASES[category])
+            .replace("\\", "/")
+        )
+    if system == "windows":
+        return (
+            Windows(
+                appname=suffix or None,
+                appauthor=False,
+                roaming=category == "config",
+                ensure_exists=False,
             )
-    return result
+            ._append_parts(_WINDOWS_BASES[category])
+            .replace("\\", "/")
+        )
+    raise ValueError(f"unsupported target system: {system}")
+
+
+def target_candidates(install_path, system):
+    """Return literal foreign paths, without inspecting host directories or env."""
+    source = _wizard_source_path(install_path)
+    categories, suffix = _classify_source_categories(install_path)
+    paths = []
+    if system == "darwin":
+        for category in categories:
+            paths.append(_standard_target_path("linux", category, suffix))
+    for category in categories:
+        paths.append(_standard_target_path(system, category, suffix))
+    if system != "darwin" and "config" in categories:
+        paths.append(_standard_target_path("linux", "config", suffix))
+    paths.append(source)
+    deduplicated = []
+    for path in paths:
+        if path not in deduplicated:
+            deduplicated.append(path)
+    return [(path, path) for path in deduplicated]
 
 
 def validate_saved_object(path, dotfiles_root):

@@ -56,7 +56,6 @@ _SYSTEM_LABELS = {
     "android": "Android (Termux)",
 }
 _CUSTOM = "__custom__"
-_SKIP = "__skip__"
 
 
 def _prompt_targets(questions):
@@ -68,7 +67,7 @@ def _prompt_targets(questions):
 
 
 def _target_wizard(install_path, configured, dry_run=False):
-    """Collect foreign mappings through the terminal prompt adapter."""
+    """Collect foreign mappings, returning None when the wizard is cancelled."""
     current = operations.os_name()
     available = [
         system
@@ -97,24 +96,27 @@ def _target_wizard(install_path, configured, dry_run=False):
         if system not in selected_systems:
             continue
         candidates = operations.target_candidates(install_path, system)
-        answers = _prompt_targets(
-            [
-                inquirer.List(
-                    "path",
-                    message=f"Target path for {system}",
-                    choices=[*candidates, ("Custom path", _CUSTOM), ("Skip", _SKIP)],
-                    default=_SKIP,
-                )
-            ]
-        )
-        if not answers or "path" not in answers:
-            return None
-        path = answers["path"]
-        if path == _SKIP:
-            continue
-        if path == _CUSTOM:
+        system_label = _SYSTEM_LABELS.get(system, system)
+        while True:
+            answers = _prompt_targets(
+                [
+                    inquirer.List(
+                        "path",
+                        message=f"Target path for {system_label}",
+                        choices=[*candidates, ("Custom path", _CUSTOM)],
+                        default=candidates[0][1],
+                    )
+                ]
+            )
+            if not answers or "path" not in answers:
+                return None
+            path = answers["path"]
+            if path != _CUSTOM:
+                break
 
             def validate(_, value, target_system=system):
+                if not value or not value.strip():
+                    return True
                 error = operations.validate_foreign_target(target_system, value)
                 if error:
                     raise ValidationError(value, reason=error)
@@ -124,7 +126,7 @@ def _target_wizard(install_path, configured, dry_run=False):
                 [
                     inquirer.Text(
                         "custom_path",
-                        message=f"Custom path for {system}",
+                        message=f"Custom path for {system_label}",
                         validate=validate,
                     )
                 ]
@@ -132,6 +134,8 @@ def _target_wizard(install_path, configured, dry_run=False):
             if not answers or "custom_path" not in answers:
                 return None
             path = answers["custom_path"]
+            if path and path.strip():
+                break
         selected[system] = path
     if not selected:
         return {}

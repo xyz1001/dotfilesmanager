@@ -75,7 +75,7 @@ def test_android_targets_use_posix_validation_and_same_path_candidate(monkeypatc
             ["termux=~/.config/app"], current_system="linux"
         )
     assert operations.target_candidates("~/.config/app", "android") == [
-        ("same home-relative path", "~/.config/app")
+        ("~/.config/app", "~/.config/app")
     ]
     rel = "a" * 32 + "/android/item"
     assert operations.is_platform_specific_save_path(rel)
@@ -531,16 +531,368 @@ def test_windows_wizard_candidates_canonicalize_home_relative_config(monkeypatch
         "expanduser",
         lambda path: r"C:\Users\Alice" if path == "~" else path,
     )
+    monkeypatch.setattr(operations, "_current_category_roots", lambda: {})
+    monkeypatch.setattr(operations, "_current_direct_only_roots", lambda: ())
     candidates = operations.target_candidates(
         r"C:\Users\Alice\.config\nvim\init", "darwin"
     )
-    assert candidates == [
-        ("same home-relative path", "~/.config/nvim/init"),
+    assert candidates == [("~/.config/nvim/init", "~/.config/nvim/init")]
+
+
+def test_target_candidates_use_literal_standard_bases_and_preserve_suffix(monkeypatch):
+    monkeypatch.setenv("HOME", "/unexpected/home")
+    monkeypatch.delenv("XDG_CONFIG_HOME", raising=False)
+    monkeypatch.setenv("APPDATA", r"C:\unexpected\appdata")
+    monkeypatch.setattr(operations, "os_name", lambda: "linux")
+    source = "~/.config/nvim/lua/init.lua"
+    assert operations.target_candidates(source, "linux") == [(source, source)]
+    assert operations.target_candidates(source, "android") == [(source, source)]
+    assert operations.target_candidates(source, "darwin") == [
+        (source, source),
         (
-            "macOS Application Support convention",
-            "~/Library/Application Support/nvim/init",
+            "~/Library/Application Support/nvim/lua/init.lua",
+            "~/Library/Application Support/nvim/lua/init.lua",
         ),
     ]
+    assert operations.target_candidates(source, "windows") == [
+        (
+            "~/AppData/Roaming/nvim/lua/init.lua",
+            "~/AppData/Roaming/nvim/lua/init.lua",
+        ),
+        (source, source),
+    ]
+
+
+def test_target_candidates_keep_nonstandard_paths_direct_only(monkeypatch):
+    monkeypatch.setattr(operations, "os_name", lambda: "linux")
+    assert operations.target_candidates("~/.vimrc", "windows") == [
+        ("~/.vimrc", "~/.vimrc")
+    ]
+
+
+def test_macos_candidates_prefer_unix_data_template(monkeypatch):
+    monkeypatch.setattr(operations, "os_name", lambda: "linux")
+    monkeypatch.setattr(
+        operations,
+        "_current_category_roots",
+        lambda: {"config": "/home/a/.config", "data": "/home/a/.local/share"},
+    )
+    monkeypatch.setattr(
+        operations, "normalize_path", lambda _: "/home/a/.local/share/app"
+    )
+
+    assert operations.target_candidates("~/.local/share/app", "darwin") == [
+        ("~/.local/share/app", "~/.local/share/app"),
+        (
+            "~/Library/Application Support/app",
+            "~/Library/Application Support/app",
+        ),
+    ]
+
+
+def test_platformdirs_private_append_helper_adapter_is_exact(monkeypatch):
+    monkeypatch.setattr(operations, "os_name", lambda: "linux")
+    assert (
+        operations._standard_target_path("linux", "config", "app/child")
+        == "~/.config/app/child"
+    )
+    assert (
+        operations._standard_target_path("darwin", "config", "app/child")
+        == "~/Library/Application Support/app/child"
+    )
+    assert (
+        operations._standard_target_path("windows", "config", "app/child")
+        == "~/AppData/Roaming/app/child"
+    )
+
+
+def test_standard_candidates_never_access_platformdirs_public_directories(monkeypatch):
+    def forbidden(_):
+        raise AssertionError("host directory discovery must not run")
+
+    monkeypatch.setattr(operations.MacOS, "user_data_dir", property(forbidden))
+    monkeypatch.setattr(operations.Windows, "user_data_dir", property(forbidden))
+    monkeypatch.setattr(operations, "os_name", lambda: "linux")
+    monkeypatch.setattr(
+        operations, "_current_category_roots", lambda: {"config": "/home/test/.config"}
+    )
+    monkeypatch.setattr(
+        operations, "normalize_path", lambda _: "/home/test/.config/app"
+    )
+    assert operations.target_candidates("~/.config/app", "darwin")[0] == (
+        "~/.config/app",
+        "~/.config/app",
+    )
+    assert operations.target_candidates("~/.config/app", "windows")[0] == (
+        "~/AppData/Roaming/app",
+        "~/AppData/Roaming/app",
+    )
+
+
+def test_category_classifier_keeps_config_data_aliases_and_rejects_other_categories(
+    monkeypatch,
+):
+    monkeypatch.setattr(operations, "os_name", lambda: "linux")
+    monkeypatch.setattr(
+        operations,
+        "_current_category_roots",
+        lambda: {
+            "config": "/home/a/.config",
+            "data": "/home/a/.local/share",
+        },
+    )
+    monkeypatch.setattr(
+        operations, "normalize_path", lambda _: "/home/a/.local/state/log/tool/file"
+    )
+    assert operations._classify_source_categories("ignored") == ((), None)
+
+    monkeypatch.setattr(
+        operations,
+        "_current_category_roots",
+        lambda: {
+            "config": "/home/a/Library/Application Support",
+            "data": "/home/a/Library/Application Support",
+        },
+    )
+    monkeypatch.setattr(
+        operations,
+        "normalize_path",
+        lambda _: "/home/a/Library/Application Support/tool/settings",
+    )
+    assert operations._classify_source_categories("ignored") == (
+        ("config", "data"),
+        "tool/settings",
+    )
+
+
+def test_category_candidates_honor_xdg_current_root_and_windows_config_order(
+    monkeypatch, tmp_path
+):
+    home = tmp_path / "home"
+    xdg = home / "redirected-config"
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(xdg))
+    monkeypatch.setattr(operations, "os_name", lambda: "linux")
+    source = str(xdg / "app" / "nested")
+    assert operations._classify_source_categories(source) == (("config",), "app/nested")
+    assert operations.target_candidates(source, "windows") == [
+        ("~/AppData/Roaming/app/nested", "~/AppData/Roaming/app/nested"),
+        ("~/.config/app/nested", "~/.config/app/nested"),
+        ("~/redirected-config/app/nested", "~/redirected-config/app/nested"),
+    ]
+
+
+def test_windows_local_cache_state_log_paths_stay_direct_only(monkeypatch):
+    monkeypatch.setattr(operations, "os_name", lambda: "windows")
+    monkeypatch.setattr(
+        operations,
+        "_current_direct_only_roots",
+        lambda: (r"C:\Users\A\AppData\Local\Logs",),
+    )
+    monkeypatch.setattr(
+        operations,
+        "_current_category_roots",
+        lambda: {
+            "config": r"C:\Users\A\AppData\Roaming",
+            "data": r"C:\Users\A\AppData\Local",
+        },
+    )
+    monkeypatch.setattr(
+        operations, "normalize_path", lambda _: r"C:\Users\A\AppData\Local\tool"
+    )
+    assert operations._classify_source_categories("ignored") == (("data",), "tool")
+    monkeypatch.setattr(
+        operations, "normalize_path", lambda _: r"C:\Users\A\AppData\Local\Logs\tool"
+    )
+    assert operations._classify_source_categories("ignored") == ((), None)
+
+
+@pytest.mark.parametrize(
+    "source",
+    ["~/.cache/tool", "~/.local/state/tool", "~/.local/state/log/tool"],
+)
+def test_cache_state_log_sources_are_direct_only_candidates(monkeypatch, source):
+    monkeypatch.setattr(operations, "os_name", lambda: "linux")
+    monkeypatch.setattr(
+        operations,
+        "_current_category_roots",
+        lambda: {"config": "/home/a/.config", "data": "/home/a/.local/share"},
+    )
+    monkeypatch.setattr(operations, "normalize_path", lambda path: "/home/a" + path[1:])
+    assert operations.target_candidates(source, "windows") == [(source, source)]
+
+
+@pytest.mark.parametrize(
+    ("current", "source", "roots", "direct_roots"),
+    [
+        (
+            "android",
+            "~/.cache/tool",
+            {"config": "/home/a/.config", "data": "/home/a/.local/share"},
+            ("/home/a/.cache", "/home/a/.local/state", "/home/a/.local/state/log"),
+        ),
+        (
+            "darwin",
+            "~/Library/Caches/tool",
+            {
+                "config": "/home/a/Library/Application Support",
+                "data": "/home/a/Library/Application Support",
+            },
+            ("/home/a/Library/Caches", "/home/a/Library/Logs"),
+        ),
+        (
+            "windows",
+            "~/AppData/Local/Logs/tool",
+            {
+                "config": r"C:\Users\A\AppData\Roaming",
+                "data": r"C:\Users\A\AppData\Local",
+            },
+            (r"C:\Users\A\AppData\Local\Logs",),
+        ),
+    ],
+)
+def test_distinguishable_non_data_roots_are_direct_only(
+    monkeypatch, current, source, roots, direct_roots
+):
+    monkeypatch.setattr(operations, "os_name", lambda: current)
+    monkeypatch.setattr(operations, "_current_category_roots", lambda: roots)
+    monkeypatch.setattr(operations, "_current_direct_only_roots", lambda: direct_roots)
+    normalized = (
+        r"C:\Users\A\AppData\Local\Logs\tool"
+        if current == "windows"
+        else "/home/a" + source[1:]
+    )
+    monkeypatch.setattr(operations, "normalize_path", lambda _: normalized)
+    monkeypatch.setattr(operations, "_wizard_source_path", lambda _: source)
+    assert operations.target_candidates(source, "linux") == [(source, source)]
+
+
+def test_macos_and_windows_data_aliases_remain_data_convertible(monkeypatch):
+    monkeypatch.setattr(operations, "os_name", lambda: "darwin")
+    monkeypatch.setattr(
+        operations,
+        "_current_category_roots",
+        lambda: {
+            "config": "/home/a/Library/Application Support",
+            "data": "/home/a/Library/Application Support",
+        },
+    )
+    monkeypatch.setattr(
+        operations,
+        "_current_direct_only_roots",
+        lambda: ("/home/a/Library/Caches", "/home/a/Library/Logs"),
+    )
+    monkeypatch.setattr(
+        operations,
+        "normalize_path",
+        lambda _: "/home/a/Library/Application Support/tool",
+    )
+    assert operations._classify_source_categories("ignored")[0] == ("config", "data")
+
+    monkeypatch.setattr(operations, "os_name", lambda: "windows")
+    monkeypatch.setattr(
+        operations,
+        "_current_category_roots",
+        lambda: {
+            "config": r"C:\Users\A\AppData\Roaming",
+            "data": r"C:\Users\A\AppData\Local",
+        },
+    )
+    monkeypatch.setattr(
+        operations,
+        "_current_direct_only_roots",
+        lambda: (r"C:\Users\A\AppData\Local\Logs",),
+    )
+    monkeypatch.setattr(
+        operations, "normalize_path", lambda _: r"C:\Users\A\AppData\Local\tool"
+    )
+    assert operations._classify_source_categories("ignored")[0] == ("data",)
+
+
+def test_macos_alias_categories_generate_deduplicated_windows_union(monkeypatch):
+    monkeypatch.setattr(operations, "os_name", lambda: "darwin")
+    monkeypatch.setattr(
+        operations,
+        "_current_category_roots",
+        lambda: {
+            "config": "/home/a/Library/Application Support",
+            "data": "/home/a/Library/Application Support",
+        },
+    )
+    monkeypatch.setattr(
+        operations,
+        "normalize_path",
+        lambda _: "/home/a/Library/Application Support/tool",
+    )
+    assert operations.target_candidates(
+        "~/Library/Application Support/tool", "windows"
+    ) == [
+        ("~/AppData/Roaming/tool", "~/AppData/Roaming/tool"),
+        ("~/AppData/Local/tool", "~/AppData/Local/tool"),
+        ("~/.config/tool", "~/.config/tool"),
+        ("~/Library/Application Support/tool", "~/Library/Application Support/tool"),
+    ]
+
+
+def test_current_category_provider_selection_uses_unix_macos_and_windows_modes(
+    monkeypatch,
+):
+    monkeypatch.setattr(
+        operations.Unix, "user_config_dir", property(lambda _: "/unix/config")
+    )
+    monkeypatch.setattr(
+        operations.Unix, "user_data_dir", property(lambda _: "/unix/data")
+    )
+    monkeypatch.setattr(operations, "os_name", lambda: "android")
+    assert operations._current_category_roots() == {
+        "config": "/unix/config",
+        "data": "/unix/data",
+    }
+
+    monkeypatch.setattr(
+        operations.MacOS,
+        "user_config_dir",
+        property(lambda _: "/mac/Application Support"),
+    )
+    monkeypatch.setattr(
+        operations.MacOS,
+        "user_data_dir",
+        property(lambda _: "/mac/Application Support"),
+    )
+    monkeypatch.setattr(operations, "os_name", lambda: "darwin")
+    mac_roots = operations._current_category_roots()
+    assert mac_roots["config"] == mac_roots["data"]
+
+    def windows_config(instance):
+        assert instance.roaming is True
+        return r"C:\Roaming"
+
+    def windows_local(instance):
+        assert instance.roaming is False
+        return r"C:\Local"
+
+    monkeypatch.setattr(operations.Windows, "user_config_dir", property(windows_config))
+    monkeypatch.setattr(operations.Windows, "user_data_dir", property(windows_local))
+    monkeypatch.setattr(operations, "os_name", lambda: "windows")
+    assert operations._current_category_roots() == {
+        "config": r"C:\Roaming",
+        "data": r"C:\Local",
+    }
+
+
+@pytest.mark.parametrize(
+    ("system", "expected"),
+    [
+        ("linux", "~/.local/share/app"),
+        ("android", "~/.local/share/app"),
+        ("darwin", "~/Library/Application Support/app"),
+        ("windows", "~/AppData/Local/app"),
+    ],
+)
+def test_category_target_layouts_for_data(system, expected):
+    assert {"data": operations._standard_target_path(system, "data", "app")} == {
+        "data": expected
+    }
 
 
 def test_platform_specific_paths_reject_foreign_targets_and_share_move(
