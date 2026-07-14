@@ -1012,6 +1012,66 @@ def test_remove_copies_shared_directory_and_moves_unique_directory_back(
     assert not unique_saved.exists()
 
 
+@pytest.mark.parametrize("kind", ["file", "directory"])
+def test_remove_all_restores_local_shared_object_and_deletes_all_registrations(
+    tmp_path, monkeypatch, kind
+):
+    repo = tmp_path / "repo"
+    saved = repo / "shared" / "item"
+    install = tmp_path / "home" / "item"
+    saved.parent.mkdir(parents=True)
+    install.parent.mkdir()
+    if kind == "file":
+        saved.write_text("shared")
+    else:
+        saved.mkdir()
+        (saved / "settings").write_text("shared")
+    install.symlink_to(saved, target_is_directory=kind == "directory")
+    config = {
+        "dotfiles": {
+            "shared/item": {
+                "linux": {"path": str(install)},
+                "darwin": {"path": "~/inaccessible"},
+            }
+        }
+    }
+    monkeypatch.setattr(operations, "os_name", lambda: "linux")
+
+    result = operations.remove(str(install), config, str(repo), all_platforms=True)
+
+    assert result.config == {"dotfiles": {}}
+    assert not os.path.lexists(saved)
+    assert not install.is_symlink()
+    if kind == "file":
+        assert install.read_text() == "shared"
+    else:
+        assert (install / "settings").read_text() == "shared"
+
+
+def test_remove_all_without_current_registration_never_touches_foreign_path(
+    tmp_path, monkeypatch
+):
+    repo = tmp_path / "repo"
+    saved = repo / "saved"
+    foreign = "/inaccessible/foreign/install"
+    repo.mkdir()
+    saved.write_text("saved")
+    config = {"dotfiles": {"saved": {"darwin": {"path": foreign}}}}
+    monkeypatch.setattr(operations, "os_name", lambda: "linux")
+    original_lexists = operations.os.path.lexists
+
+    def reject_foreign(path):
+        assert path != foreign
+        return original_lexists(path)
+
+    monkeypatch.setattr(operations.os.path, "lexists", reject_foreign)
+
+    result = operations.remove(str(saved), config, str(repo), all_platforms=True)
+
+    assert result.config == {"dotfiles": {}}
+    assert not saved.exists()
+
+
 def test_remove_is_silent_when_current_system_is_not_registered(tmp_path, monkeypatch):
     repo = tmp_path / "repo"
     repo.mkdir()

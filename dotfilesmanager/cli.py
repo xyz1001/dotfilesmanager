@@ -17,7 +17,7 @@ dotfile管理工具(dotfiles manager)，dotfile指保存配置信息的文件或
 
 Usage:
     dfm add <install_path> [--system] [--non-interactive] [--target=<mapping>...] [--dry-run] [--force] [--backup]
-    dfm rm <path> [--dry-run] [--force] [--backup]
+    dfm rm <path> [--all] [--dry-run] [--force] [--backup]
     dfm install [<save_path>] [--dry-run] [--force] [--backup]
     dfm share <save_path> <install_path> [--non-interactive] [--target=<mapping>...] [--dry-run] [--force] [--backup]
     dfm view [--dry-run] [--force] [--backup]
@@ -31,6 +31,7 @@ Options:
     --dry-run  Validate and show what would be changed without writing.
     --force    Do not ask before replacing an existing path.
     --backup   Keep the transaction's pre-change backups after commit.
+    --all      Remove registrations for every platform.
     --repair   Recover an interrupted transaction.
 """
 
@@ -213,7 +214,7 @@ def _preconfirm_install(abs_save_path, dotfiles_config, root, force):
     return approved
 
 
-def _mutation_paths(command, args, dotfiles_config, root):
+def _mutation_paths(command, args, dotfiles_config, root, resolved_save_path=None):
     """Return direct paths each operation may replace, move, or unlink."""
     if command == "add":
         install = operations.normalize_path(args["<install_path>"])
@@ -222,20 +223,21 @@ def _mutation_paths(command, args, dotfiles_config, root):
             operations.get_save_path(install, args.get("--system", False), root),
         ]
     if command == "rm":
-        path = operations.normalize_path(args["<path>"])
-        saved = operations._remove_save_path(path, root)
-        paths = [path, saved]
+        saved = resolved_save_path
+        if saved is None:
+            path = operations.normalize_path(args["<path>"])
+            saved = operations._remove_save_path(path, root)
+        paths = [saved]
         rel_path = os.path.relpath(saved, root).replace(os.sep, "/")
-        # Snapshot every configured install path for this saved object.  The
-        # current operation normally changes one, but this makes recovery safe
-        # if a malformed/shared mapping or a future implementation touches more.
-        for system, item in (
-            dotfiles_config.get("dotfiles", {}).get(rel_path, {}).items()
-        ):
-            if system != operations.os_name():
-                continue
-            if isinstance(item, dict) and item.get("path"):
-                paths.append(operations.normalize_path(item["path"]))
+        # rm only mutates its saved object and, when registered, the current
+        # platform's install path. Foreign mappings are configuration data.
+        item = (
+            dotfiles_config.get("dotfiles", {})
+            .get(rel_path, {})
+            .get(operations.os_name())
+        )
+        if isinstance(item, dict) and item.get("path"):
+            paths.append(operations.normalize_path(item["path"]))
         return paths
     if command == "share":
         return [operations.normalize_path(args["<install_path>"])]
@@ -418,11 +420,11 @@ def main():
                 _fail(error)
         elif command == "rm":
             path = operations.normalize_path(args["<path>"])
-            error = operations.validate_remove(path, root)
+            rm_save_path = operations._remove_save_path(path, root)
+            error = operations.validate_remove(path, root, rm_save_path)
             if error:
                 _fail(error)
-            saved = operations._remove_save_path(path, root)
-            rel_path = os.path.relpath(saved, root).replace(os.sep, "/")
+            rel_path = os.path.relpath(rm_save_path, root).replace(os.sep, "/")
             error = operations.validate_remove_destination(
                 dotfiles_config, rel_path, root, args.get("--force", False)
             )
@@ -485,6 +487,7 @@ def main():
                 _fail(error)
         original_config = copy.deepcopy(dotfiles_config)
         share_state = None
+        rm_save_path = None
         if command == "add":
             install = operations.normalize_path(args["<install_path>"])
             error = operations.validate_add(install, args.get("--system", False), root)
@@ -492,11 +495,11 @@ def main():
                 _fail(error)
         elif command == "rm":
             path = operations.normalize_path(args["<path>"])
-            error = operations.validate_remove(path, root)
+            rm_save_path = operations._remove_save_path(path, root)
+            error = operations.validate_remove(path, root, rm_save_path)
             if error:
                 _fail(error)
-            saved = operations._remove_save_path(path, root)
-            rel_path = os.path.relpath(saved, root).replace(os.sep, "/")
+            rel_path = os.path.relpath(rm_save_path, root).replace(os.sep, "/")
             error = operations.validate_remove_destination(
                 dotfiles_config, rel_path, root, args.get("--force", False)
             )
@@ -565,7 +568,7 @@ def main():
 
         tx = transaction.Transaction(
             root,
-            _mutation_paths(command, args, dotfiles_config, root),
+            _mutation_paths(command, args, dotfiles_config, root, rm_save_path),
             args.get("--backup", False),
         )
         tx.begin()
@@ -581,7 +584,12 @@ def main():
                 )
             elif command == "rm":
                 result = operations.remove(
-                    path, dotfiles_config, root, args.get("--force", False)
+                    path,
+                    dotfiles_config,
+                    root,
+                    args.get("--force", False),
+                    args.get("--all", False),
+                    rm_save_path,
                 )
             elif command == "install":
                 result = operations.install(

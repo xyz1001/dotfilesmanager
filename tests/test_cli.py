@@ -53,6 +53,7 @@ def _args(command, **values):
         "--dry-run": False,
         "--force": False,
         "--backup": False,
+        "--all": False,
         "--repair": False,
         "<install_path>": None,
         "<save_path>": None,
@@ -342,10 +343,15 @@ def test_docopt_parses_repeated_targets():
     assert args["--target"] == ["darwin=~/a", "windows=~/b"]
 
 
+def test_docopt_parses_rm_all():
+    args = cli.docopt(cli.USAGE, argv=["rm", "~/item", "--all"])
+    assert args["--all"] is True
+
+
 @pytest.mark.parametrize(
     ("command", "values", "expected"),
     [
-        ("rm", {"<path>": "path"}, ("remove", ("/path",))),
+        ("rm", {"<path>": "path", "--all": True}, ("remove", ("/path",))),
         ("install", {"<save_path>": None}, ("install", (None,))),
         ("install", {"<save_path>": "save"}, ("install", ("/save",))),
         (
@@ -399,8 +405,12 @@ def test_main_dispatches_remaining_commands_and_saves(
 
     operation, paths = expected
     if operation == "remove":
-        cli.operations.validate_remove.assert_called_once_with("/path", "/repo")
-        remove.assert_called_once_with(*paths, dotfiles_config, "/repo", False)
+        cli.operations.validate_remove.assert_called_once_with(
+            "/path", "/repo", "/path"
+        )
+        remove.assert_called_once_with(
+            *paths, dotfiles_config, "/repo", False, True, "/path"
+        )
         install.assert_not_called()
         share.assert_not_called()
     elif operation == "install":

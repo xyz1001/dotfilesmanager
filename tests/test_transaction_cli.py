@@ -22,6 +22,7 @@ def _args(command, **values):
         "--dry-run": False,
         "--force": False,
         "--backup": False,
+        "--all": False,
         "--repair": False,
         "<install_path>": None,
         "<save_path>": None,
@@ -562,6 +563,58 @@ def test_force_rm_preserves_conflicting_destination_in_transaction(
     )
     assert install.read_text() == "managed"
     assert any((root / transaction.BACKUPS).iterdir())
+
+
+def test_rm_all_uses_preflight_saved_path_when_supplied_link_is_retargeted(
+    tmp_path, monkeypatch
+):
+    home = tmp_path / "home"
+    root = home / "dotfiles"
+    first = root / "first"
+    second = root / "second"
+    first_install = home / "first-install"
+    second_install = home / "second-install"
+    supplied_link = home / "supplied-link"
+    home.mkdir()
+    root.mkdir()
+    first.write_text("first")
+    second.write_text("second")
+    first_install.symlink_to(first)
+    second_install.symlink_to(second)
+    supplied_link.symlink_to(first)
+    system = operations.os_name()
+    config.save_config(
+        str(root),
+        {
+            "dotfiles": {
+                "first": {system: {"path": "~/first-install"}},
+                "second": {system: {"path": "~/second-install"}},
+            }
+        },
+    )
+    monkeypatch.setenv("HOME", str(home))
+    real_begin = transaction.Transaction.begin
+
+    def retarget_after_begin(instance):
+        real_begin(instance)
+        supplied_link.unlink()
+        supplied_link.symlink_to(second)
+
+    monkeypatch.setattr(transaction.Transaction, "begin", retarget_after_begin)
+
+    _run(
+        monkeypatch,
+        root,
+        _args("rm", **{"<path>": str(supplied_link), "--all": True}),
+    )
+
+    assert first_install.read_text() == "first"
+    assert not first.exists()
+    assert second_install.is_symlink()
+    assert second.exists()
+    assert config.load_config(str(root)) == {
+        "dotfiles": {"second": {system: {"path": "~/second-install"}}}
+    }
 
 
 def test_view_dry_run_writes_nothing_and_force_rebuilds(tmp_path, monkeypatch):

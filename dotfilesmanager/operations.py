@@ -159,8 +159,8 @@ def _remove_save_path(path, dotfiles_root):
     return os.path.abspath(os.path.normpath(target_path))
 
 
-def validate_remove(path, dotfiles_root):
-    target_path = _remove_save_path(path, dotfiles_root)
+def validate_remove(path, dotfiles_root, resolved_save_path=None):
+    target_path = resolved_save_path or _remove_save_path(path, dotfiles_root)
     if not _is_within(target_path, dotfiles_root):
         return f"{path} is not in dotfiles"
     return None
@@ -670,13 +670,28 @@ def add(install_path, system, config, dotfiles_root, targets=None):
     )
 
 
-def remove(path, config, dotfiles_root, force=False):
-    abs_save_path = _remove_save_path(path, dotfiles_root)
+def remove(
+    path,
+    config,
+    dotfiles_root,
+    force=False,
+    all_platforms=False,
+    resolved_save_path=None,
+):
+    """Remove a managed object, optionally using a pre-resolved saved path."""
+    abs_save_path = resolved_save_path or _remove_save_path(path, dotfiles_root)
     rel_save_path = os.path.relpath(abs_save_path, dotfiles_root).replace(
         os.sep, posixpath.sep
     )
     install_path = get_path(config, rel_save_path)
     if install_path is None:
+        if all_platforms and rel_save_path in config["dotfiles"]:
+            if os.path.islink(abs_save_path) or os.path.isfile(abs_save_path):
+                os.unlink(abs_save_path)
+            else:
+                shutil.rmtree(abs_save_path)
+            del config["dotfiles"][rel_save_path]
+            return OperationResult(config, [f"Remove {rel_save_path}"])
         return OperationResult(config)
 
     error = validate_remove_destination(config, rel_save_path, dotfiles_root, force)
@@ -693,7 +708,7 @@ def remove(path, config, dotfiles_root, force=False):
         else:
             shutil.rmtree(install_path)
     del config["dotfiles"][rel_save_path][os_name()]
-    if config["dotfiles"][rel_save_path]:
+    if config["dotfiles"][rel_save_path] and not all_platforms:
         if os.path.isfile(abs_save_path):
             shutil.copy(abs_save_path, install_path)
         else:
@@ -701,9 +716,6 @@ def remove(path, config, dotfiles_root, force=False):
     else:
         shutil.move(abs_save_path, install_path)
         del config["dotfiles"][rel_save_path]
-    abs_save_dir = os.path.dirname(abs_save_path)
-    if len(os.listdir(abs_save_dir)) == 0:
-        os.rmdir(abs_save_dir)
     return OperationResult(config, [f"Remove {rel_save_path}"])
 
 
