@@ -210,7 +210,9 @@ def test_view_force_and_direct_partial_state_on_config_failure(tmp_path, monkeyp
     config.save_config(str(root), {"dotfiles": {rel: {}}})
     _run(monkeypatch, "share", saved, install, "--non-interactive")
     _run(monkeypatch, "view")
-    assert any((root / "view").rglob(".shared"))
+    entries = operations.plan_view(config.load_config(str(root)), str(root))
+    assert len(entries) == 1
+    assert os.path.islink(entries[0].path)
     with pytest.raises(SystemExit):
         _run(monkeypatch, "view")
     _run(monkeypatch, "view", "--force")

@@ -31,6 +31,92 @@ def test_save_config_writes_unix_newlines_and_loads_data(tmp_path):
     assert config.load_config(str(tmp_path)) == data
 
 
+def test_load_normalizes_only_schema_paths_and_save_writes_slashes(tmp_path):
+    (tmp_path / "dfm.yaml").write_text(
+        "other: {kept: 'a"
+        "\\"
+        "b'}\n"
+        "dotfiles:\n"
+        "  'saved"
+        "\\"
+        "item':\n"
+        "    windows: {path: 'C:"
+        "\\"
+        "Users"
+        "\\"
+        "Alice"
+        "\\"
+        "item'}\n"
+    )
+
+    data = config.load_config(str(tmp_path))
+
+    assert data["other"] == {"kept": "a\\b"}
+    assert data["dotfiles"] == {
+        "saved/item": {"windows": {"path": "C:/Users/Alice/item"}}
+    }
+    config.save_config(str(tmp_path), data)
+    content = (tmp_path / "dfm.yaml").read_bytes()
+    assert b"saved/item" in content
+    assert b"C:/Users/Alice/item" in content
+
+
+def test_load_rejects_colliding_normalized_saved_paths(tmp_path):
+    (tmp_path / "dfm.yaml").write_text(
+        "dotfiles: {'saved/item': {}, 'saved\\item': {}}\n"
+    )
+
+    with pytest.raises(ValueError, match="normalized saved paths collide"):
+        config.load_config(str(tmp_path))
+
+
+def test_load_normalization_does_not_mutate_top_level_yaml_alias(tmp_path):
+    (tmp_path / "dfm.yaml").write_text(
+        "shared: &shared {path: 'C:"
+        "\\"
+        "legacy'}\n"
+        "dotfiles: {'saved"
+        "\\"
+        "item': {windows: *shared}}\n"
+    )
+
+    data = config.load_config(str(tmp_path))
+
+    assert data["shared"]["path"] == "C:\\legacy"
+    assert data["dotfiles"]["saved/item"]["windows"]["path"] == "C:/legacy"
+
+
+def test_save_collision_does_not_mutate_input(tmp_path):
+    data = {
+        "dotfiles": {
+            "saved\\item": {"linux": {"path": "~\\one"}},
+            "saved/item": {"linux": {"path": "~\\two"}},
+        }
+    }
+
+    with pytest.raises(ValueError, match="normalized saved paths collide"):
+        config.save_config(str(tmp_path), data)
+
+    assert data == {
+        "dotfiles": {
+            "saved\\item": {"linux": {"path": "~\\one"}},
+            "saved/item": {"linux": {"path": "~\\two"}},
+        }
+    }
+
+
+def test_save_write_failure_does_not_mutate_input(tmp_path, monkeypatch):
+    data = {"dotfiles": {"saved\\item": {"windows": {"path": "C:\\item"}}}}
+    monkeypatch.setattr(
+        config.os, "replace", lambda *args: (_ for _ in ()).throw(OSError("replace"))
+    )
+
+    with pytest.raises(OSError, match="replace"):
+        config.save_config(str(tmp_path), data)
+
+    assert data == {"dotfiles": {"saved\\item": {"windows": {"path": "C:\\item"}}}}
+
+
 def test_save_failure_keeps_existing_config_and_cleans_temporary(tmp_path, monkeypatch):
     config.save_config(str(tmp_path), {"dotfiles": {"old": {}}})
     monkeypatch.setattr(

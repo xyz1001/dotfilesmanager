@@ -12,6 +12,7 @@ import platform
 import posixpath
 import shutil
 import sys
+import uuid
 from dataclasses import dataclass, field
 from stat import S_ISDIR
 
@@ -302,6 +303,111 @@ def _is_safe_system_component(system):
     )
 
 
+def _encode_view_component(value):
+    """Encode arbitrary config text as one portable, reversible path component."""
+    return "v" + value.encode("utf-8", "surrogatepass").hex()
+
+
+def _is_readable_view_component(value):
+    """Recognize one component that is portable on the host's filesystem."""
+    reserved = {"con", "prn", "aux", "nul"}
+    reserved.update({"com" + str(number) for number in range(1, 10)})
+    reserved.update({"lpt" + str(number) for number in range(1, 10)})
+    if not isinstance(value, str) or value in ("", ".", ".."):
+        return False
+    if any(character in "/\\" or ord(character) < 32 for character in value):
+        return False
+    if os.name != "nt":
+        return True
+    return (
+        not value.endswith((".", " "))
+        and value.split(".", 1)[0].casefold() not in reserved
+        and not any(character in '<>:"|?*' for character in value)
+    )
+
+
+def _view_component(value, force_escape=False):
+    if not force_escape and _is_readable_view_component(value):
+        return value
+    return _encode_view_component(value)
+
+
+def _view_path_within(path, directory):
+    """Use host filesystem rules, irrespective of the target platform."""
+    try:
+        return os.path.commonpath(
+            (os.path.abspath(path), os.path.abspath(directory))
+        ) == (os.path.abspath(directory))
+    except ValueError:
+        return False
+
+
+def _view_projection_components(path, view_root):
+    """Return host-normalized relative components for projection comparisons."""
+    components = tuple(os.path.relpath(path, view_root).split(os.sep))
+    return (
+        tuple(component.casefold() for component in components)
+        if os.name == "nt"
+        else components
+    )
+
+
+def _view_target_path(system, path):
+    """Classify a target path using its platform's lexical path conventions."""
+    windows_target = system.casefold() == "windows"
+    module = ntpath if windows_target else posixpath
+    path = str(path)
+    if windows_target:
+        text = path.replace("/", "\\")
+        if text.startswith("~\\"):
+            namespace, tail = "home", text[2:]
+        elif text.startswith("\\\\"):
+            namespace, tail = "unc", text[2:]
+        else:
+            drive, tail = module.splitdrive(text)
+            if drive and tail.startswith("\\"):
+                namespace = "drive:" + drive
+                tail = tail[1:]
+            elif text.startswith("\\"):
+                namespace, tail = "absolute", text[1:]
+            else:
+                namespace, tail = "legacy", text
+        parts = tail.split("\\")
+    else:
+        if path.startswith("~/"):
+            namespace, tail = "home", path[2:]
+        elif path.startswith("/"):
+            namespace, tail = "absolute", path[1:]
+        else:
+            namespace, tail = "legacy", path
+        parts = tail.split("/")
+    logical = []
+    for part in parts:
+        if part in ("", "."):
+            continue
+        if part == "..":
+            if logical and logical[-1] != "..":
+                logical.pop()
+            elif namespace == "legacy":
+                logical.append(part)
+            continue
+        logical.append(part)
+    return namespace, tuple(logical)
+
+
+def _view_entry_path(view_root, system, namespace, parts, force_escape=False):
+    path = os.path.join(
+        view_root,
+        _view_component(system, force_escape),
+        _view_component(namespace, force_escape),
+    )
+    for part in parts or (".",):
+        path = os.path.join(path, _view_component(part, force_escape))
+    if not _view_path_within(path, view_root):
+        raise ValueError("view path escapes generated view")
+    return path
+
+
 def _is_excluded_view_source(path, root):
     return any(
         path == os.path.join(root, name) or _is_within(path, os.path.join(root, name))
@@ -310,29 +416,15 @@ def _is_excluded_view_source(path, root):
 
 
 def plan_view(config, dotfiles_root):
-    """Validate and return current-platform links for the generated view."""
+    """Validate and return links for every configured platform's generated view."""
     root = os.path.abspath(dotfiles_root)
     real_root = os.path.realpath(root)
-    home = normalize_path(os.path.expanduser("~"))
-    system = os_name()
-    if not _is_safe_system_component(system):
-        raise ValueError("current system name is not a safe path component")
+    current_system = os_name()
+    candidates = []
     entries = []
-    seen = []
+    logical_paths = []
+    projected_paths = []
     for rel_save_path, systems in config["dotfiles"].items():
-        item = systems.get(system)
-        if item is None:
-            continue
-        install = normalize_path(item["path"])
-        if install == home:
-            raise ValueError("configured install path cannot be home itself")
-        if not _is_within(install, home) or _is_within(install, root):
-            raise ValueError("configured install path is outside home")
-        relative_install = os.path.relpath(install, home)
-        view_path = os.path.join(root, VIEW_DIRECTORY, system, "home", relative_install)
-        for other in seen:
-            if _is_within(view_path, other) or _is_within(other, view_path):
-                raise ValueError("view paths duplicate or overlap")
         saved = os.path.abspath(os.path.join(root, rel_save_path.replace("/", os.sep)))
         error = validate_saved_object(saved, root)
         if error:
@@ -344,8 +436,70 @@ def plan_view(config, dotfiles_root):
             or _is_excluded_view_source(real_saved, real_root)
         ):
             raise ValueError("saved object is not a safe canonical object")
-        entries.append(ViewEntry(view_path, saved, os.path.isdir(saved)))
-        seen.append(view_path)
+        for system, item in systems.items():
+            if system == current_system:
+                home = normalize_path(os.path.expanduser("~"))
+                install = normalize_path(item["path"])
+                if install == home:
+                    raise ValueError("configured install path cannot be home itself")
+                if not _is_within(install, home) or _is_within(install, root):
+                    raise ValueError("configured install path is outside home")
+                namespace = "home"
+                parts = tuple(os.path.relpath(install, home).split(os.sep))
+            else:
+                namespace, parts = _view_target_path(system, item["path"])
+            logical_system = (
+                system.casefold() if system.casefold() == "windows" else system
+            )
+            logical_parts = (
+                tuple(part.casefold() for part in parts)
+                if system.casefold() == "windows"
+                else parts
+            )
+            logical_namespace = (
+                namespace.casefold() if system.casefold() == "windows" else namespace
+            )
+            logical_path = (logical_system, logical_namespace, logical_parts)
+            for other_system, other_namespace, other_parts in logical_paths:
+                if (
+                    logical_system == other_system
+                    and logical_namespace == other_namespace
+                    and (
+                        logical_parts[: len(other_parts)] == other_parts
+                        or other_parts[: len(logical_parts)] == logical_parts
+                    )
+                ):
+                    raise ValueError("view paths duplicate or overlap")
+            candidates.append((system, namespace, parts, saved, os.path.isdir(saved)))
+            logical_paths.append(logical_path)
+    view_root = os.path.join(root, VIEW_DIRECTORY)
+    initial_paths = [
+        _view_entry_path(view_root, system, namespace, parts)
+        for system, namespace, parts, _saved, _is_directory in candidates
+    ]
+    projection_groups = {}
+    for index, view_path in enumerate(initial_paths):
+        projection_key = _view_projection_components(view_path, view_root)
+        projection_groups.setdefault(projection_key, []).append(index)
+    escaped = {
+        index
+        for indexes in projection_groups.values()
+        if len(indexes) > 1
+        for index in indexes
+    }
+    for index, (system, namespace, parts, saved, is_directory) in enumerate(candidates):
+        view_path = _view_entry_path(
+            view_root, system, namespace, parts, force_escape=index in escaped
+        )
+        projected_path = _view_projection_components(view_path, view_root)
+        for other in projected_paths:
+            if (
+                projected_path[: len(other)] == other
+                or other[: len(projected_path)] == projected_path
+            ):
+                raise ValueError("view projection paths duplicate or overlap")
+        entries.append(ViewEntry(view_path, saved, is_directory))
+        projected_paths.append(projected_path)
     return entries
 
 
@@ -414,16 +568,47 @@ def view(config, dotfiles_root, force=False):
     if error:
         raise ValueError(error)
     view_root = os.path.join(dotfiles_root, VIEW_DIRECTORY)
-    if os.path.lexists(view_root):
-        shutil.rmtree(view_root)
-    os.makedirs(view_root)
-    for entry in entries:
-        os.makedirs(os.path.dirname(entry.path), exist_ok=True)
-        windows.create_symlink(
-            os.path.relpath(entry.target, os.path.dirname(entry.path)),
-            entry.path,
-            target_is_directory=entry.is_directory,
-        )
+    staging_root = os.path.join(dotfiles_root, ".view-staging-" + uuid.uuid4().hex)
+    backup_root = os.path.join(dotfiles_root, ".view-backup-" + uuid.uuid4().hex)
+    committed = False
+    moved_old_view = False
+    try:
+        os.makedirs(staging_root)
+        for entry in entries:
+            relative_path = os.path.relpath(entry.path, view_root)
+            staging_path = os.path.join(staging_root, relative_path)
+            if not _view_path_within(staging_path, staging_root):
+                raise ValueError("view staging path escapes generated view")
+            os.makedirs(os.path.dirname(staging_path), exist_ok=True)
+            windows.create_symlink(
+                os.path.relpath(entry.target, os.path.dirname(staging_path)),
+                staging_path,
+                target_is_directory=entry.is_directory,
+            )
+        if os.path.lexists(view_root):
+            os.replace(view_root, backup_root)
+            moved_old_view = True
+        try:
+            os.replace(staging_root, view_root)
+        except OSError:
+            if moved_old_view:
+                try:
+                    os.replace(backup_root, view_root)
+                except OSError as restore_error:
+                    raise OSError(
+                        "view replacement failed and old view could not be restored"
+                    ) from restore_error
+            raise
+        committed = True
+    except Exception:
+        if not committed and os.path.lexists(staging_root):
+            shutil.rmtree(staging_root)
+        raise
+    if os.path.lexists(backup_root):
+        try:
+            shutil.rmtree(backup_root)
+        except OSError:
+            pass
     return OperationResult(config, [f"View {len(entries)} item(s)"])
 
 

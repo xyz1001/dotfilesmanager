@@ -21,17 +21,25 @@ def load_config(dotfiles_root):
         config = yaml.load(config_file, Loader=yaml.SafeLoader)
         if "dotfiles" not in config:
             config["dotfiles"] = {}
+        normalized = _normalize_schema_paths(config)
+        if normalized is not None:
+            config["dotfiles"] = normalized
         return config
 
 
 def save_config(dotfiles_root, config):
     """Persist a dotfile mapping atomically (and durably where supported)."""
+    config_to_save = config
+    normalized = _normalize_schema_paths(config)
+    if normalized is not None:
+        config_to_save = dict(config)
+        config_to_save["dotfiles"] = normalized
     os.makedirs(dotfiles_root, exist_ok=True)
     config_path = os.path.join(dotfiles_root, "dfm.yaml")
     fd, temporary_path = tempfile.mkstemp(prefix=".dfm.yaml.", dir=dotfiles_root)
     try:
         with os.fdopen(fd, "w", newline="\n") as config_file:
-            config_file.write(yaml.dump(config, Dumper=yaml.SafeDumper))
+            config_file.write(yaml.dump(config_to_save, Dumper=yaml.SafeDumper))
             config_file.flush()
             os.fsync(config_file.fileno())
         os.replace(temporary_path, config_path)
@@ -39,6 +47,38 @@ def save_config(dotfiles_root, config):
     finally:
         if os.path.exists(temporary_path):
             os.unlink(temporary_path)
+
+
+def _normalize_schema_paths(config):
+    """Return a copy-on-write canonical version of the dfm schema subtree."""
+    if not isinstance(config, dict) or not isinstance(config.get("dotfiles"), dict):
+        return None
+    canonical_paths = set()
+    for saved_path, _systems in config["dotfiles"].items():
+        canonical_saved_path = (
+            saved_path.replace("\\", "/") if isinstance(saved_path, str) else saved_path
+        )
+        if canonical_saved_path in canonical_paths:
+            raise ValueError("normalized saved paths collide in dfm.yaml")
+        canonical_paths.add(canonical_saved_path)
+
+    normalized = {}
+    for saved_path, systems in config["dotfiles"].items():
+        canonical_saved_path = (
+            saved_path.replace("\\", "/") if isinstance(saved_path, str) else saved_path
+        )
+        if isinstance(systems, dict):
+            normalized_systems = {}
+            for system, item in systems.items():
+                if isinstance(item, dict) and isinstance(item.get("path"), str):
+                    item = dict(item)
+                    item["path"] = item["path"].replace("\\", "/")
+                elif isinstance(item, dict):
+                    item = dict(item)
+                normalized_systems[system] = item
+            systems = normalized_systems
+        normalized[canonical_saved_path] = systems
+    return normalized
 
 
 def _sync_directory(path):

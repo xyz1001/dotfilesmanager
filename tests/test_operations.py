@@ -6,7 +6,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from dotfilesmanager import operations
+from dotfilesmanager import config, operations
 
 
 def test_mutation_validation_rejects_windows_reparse_root(tmp_path, monkeypatch):
@@ -145,7 +145,8 @@ def test_android_current_namespace_never_falls_back_to_linux(tmp_path, monkeypat
     assert (home / "android").is_symlink()
     assert installed.messages == [f"Install saved -> {home / 'android'}"]
     entries = operations.plan_view(config, str(root))
-    assert entries[0].path.startswith(str(root / "view" / "android"))
+    assert len(entries) == 2
+    assert any("android" in entry.path for entry in entries)
 
 
 def test_get_save_path_hashes_shrunk_parent_and_optional_system(tmp_path, monkeypatch):
@@ -1324,27 +1325,270 @@ def test_config_only_validates_current_platform_install_paths(tmp_path, monkeypa
     assert operations.validate_config(config, str(repo)) == []
 
 
-def test_view_plan_uses_readable_current_platform_relative_links(tmp_path, monkeypatch):
+def test_view_plan_uses_readable_all_platform_relative_links(tmp_path, monkeypatch):
     home = tmp_path / "home"
     repo = home / "dotfiles"
     saved = repo / "objects" / "item"
+    foreign = repo / "foreign"
+    windows_saved = repo / "windows"
     saved.parent.mkdir(parents=True)
     saved.write_text("value")
+    foreign.write_text("foreign value")
+    windows_saved.write_text("windows value")
     monkeypatch.setenv("HOME", str(home))
     monkeypatch.setattr(operations, "os_name", lambda: "linux")
     config = {
         "dotfiles": {
             "objects/item": {"linux": {"path": "~/.config/app/item"}},
             "foreign": {"darwin": {"path": "~/Library/item"}},
+            "windows": {"windows": {"path": "~/AppData/Local/app"}},
         }
     }
 
     result = operations.view(config, str(repo))
-    link = repo / "view" / "linux" / "home" / ".config" / "app" / "item"
-    assert link.is_symlink()
-    assert os.readlink(link) == os.path.relpath(saved, link.parent)
-    assert link.resolve() == saved
+    assert result.messages == ["View 3 item(s)"]
+    entries = operations.plan_view(config, str(repo))
+    link = next(entry.path for entry in entries if entry.target == str(saved))
+    assert link == str(repo / "view" / "linux" / "home" / ".config" / "app" / "item")
+    assert os.path.islink(link)
+    assert os.readlink(link) == os.path.relpath(saved, os.path.dirname(link))
+    assert os.path.realpath(link) == str(saved)
+    foreign_link = next(entry.path for entry in entries if entry.target == str(foreign))
+    assert os.path.islink(foreign_link)
+    assert os.readlink(foreign_link) == os.path.relpath(
+        foreign, os.path.dirname(foreign_link)
+    )
+    assert os.path.realpath(foreign_link) == str(foreign)
+    windows_link = next(
+        entry.path for entry in entries if entry.target == str(windows_saved)
+    )
+    assert windows_link == str(
+        repo / "view" / "windows" / "home" / "AppData" / "Local" / "app"
+    )
+    assert os.path.islink(windows_link)
     assert result.config is config
+
+
+def test_view_reads_legacy_backslash_saved_key_on_linux(tmp_path, monkeypatch):
+    home = tmp_path / "home"
+    repo = home / "dotfiles"
+    saved = repo / "saved" / "item"
+    saved.parent.mkdir(parents=True)
+    saved.write_text("value")
+    (repo / "dfm.yaml").write_text(
+        "dotfiles: {'saved\\item': {linux: {path: '~/.item'}}}\n"
+    )
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setattr(operations, "os_name", lambda: "linux")
+
+    data = config.load_config(str(repo))
+    result = operations.view(data, str(repo))
+
+    assert data["dotfiles"] == {"saved/item": {"linux": {"path": "~/.item"}}}
+    assert result.messages == ["View 1 item(s)"]
+
+
+def test_view_projects_legacy_platform_paths_without_host_path_components(
+    tmp_path, monkeypatch
+):
+    repo = tmp_path / "dotfiles"
+    repo.mkdir()
+    monkeypatch.setattr(operations, "os_name", lambda: "linux")
+    config = {"dotfiles": {}}
+    paths = {
+        "posix": ("darwin", "/Users/alice/.config/app"),
+        "home": ("windows", r"~\App\settings"),
+        "drive": ("windows", r"C:\Users\Alice\settings"),
+        "unc": ("windows", r"\\server\share\settings"),
+        "legacy": ("unknown/../CON", r"C:\legacy\settings"),
+    }
+    for name, (system, path) in paths.items():
+        (repo / name).write_text(name)
+        config["dotfiles"][name] = {system: {"path": path}}
+
+    entries = operations.plan_view(config, str(repo))
+
+    assert len(entries) == len(paths)
+    assert all(
+        operations._view_path_within(entry.path, str(repo / "view"))
+        for entry in entries
+    )
+    assert all(
+        ".." not in os.path.relpath(entry.path, repo / "view").split(os.sep)
+        for entry in entries
+    )
+
+
+def test_view_accepts_unsafe_platform_names_with_safe_projection(tmp_path, monkeypatch):
+    repo = tmp_path / "dotfiles"
+    repo.mkdir()
+    (repo / "saved").write_text("saved")
+    monkeypatch.setattr(operations, "os_name", lambda: "linux")
+
+    entry = operations.plan_view(
+        {"dotfiles": {"saved": {"../CON": {"path": "legacy/path"}}}}, str(repo)
+    )[0]
+
+    assert operations._view_path_within(entry.path, str(repo / "view"))
+    assert "CON" not in os.path.relpath(entry.path, repo / "view").split(os.sep)
+
+
+def test_view_uses_windows_target_case_rules_but_not_darwin_case_rules(
+    tmp_path, monkeypatch
+):
+    repo = tmp_path / "dotfiles"
+    repo.mkdir()
+    (repo / "one").write_text("one")
+    (repo / "two").write_text("two")
+    monkeypatch.setattr(operations, "os_name", lambda: "linux")
+
+    with pytest.raises(ValueError, match="duplicate or overlap"):
+        operations.plan_view(
+            {
+                "dotfiles": {
+                    "one": {"windows": {"path": r"~\Foo"}},
+                    "two": {"windows": {"path": r"~\foo"}},
+                }
+            },
+            str(repo),
+        )
+    with pytest.raises(ValueError, match="duplicate or overlap"):
+        operations.plan_view(
+            {
+                "dotfiles": {
+                    "one": {"windows": {"path": r"C:\Foo"}},
+                    "two": {"windows": {"path": r"c:\foo"}},
+                }
+            },
+            str(repo),
+        )
+    entries = operations.plan_view(
+        {
+            "dotfiles": {
+                "one": {"darwin": {"path": "~/Foo"}},
+                "two": {"darwin": {"path": "~/foo"}},
+            }
+        },
+        str(repo),
+    )
+    assert len(entries) == 2
+    assert entries[0].path != entries[1].path
+
+
+def test_view_preserves_colons_on_posix_hosts_and_escapes_them_on_windows(
+    tmp_path, monkeypatch
+):
+    repo = tmp_path / "dotfiles"
+    repo.mkdir()
+    (repo / "one").write_text("one")
+    monkeypatch.setattr(operations, "os_name", lambda: "linux")
+    config = {"dotfiles": {"one": {"darwin": {"path": "~/foo:bar"}}}}
+
+    entry = operations.plan_view(config, str(repo))[0]
+
+    assert entry.path.endswith(os.path.join("darwin", "home", "foo:bar"))
+    monkeypatch.setattr(operations.os, "name", "nt")
+    entry = operations.plan_view(config, str(repo))[0]
+    assert os.path.basename(entry.path) == "v666f6f3a626172"
+
+
+def test_view_rejects_escaped_projection_parent_overlap(tmp_path, monkeypatch):
+    repo = tmp_path / "dotfiles"
+    repo.mkdir()
+    (repo / "one").write_text("one")
+    (repo / "two").write_text("two")
+    monkeypatch.setattr(operations, "os_name", lambda: "linux")
+    monkeypatch.setattr(operations.os, "name", "nt")
+
+    with pytest.raises(ValueError, match="projection paths duplicate or overlap"):
+        operations.plan_view(
+            {
+                "dotfiles": {
+                    "one": {"darwin": {"path": "~/:"}},
+                    "two": {"darwin": {"path": "~/v3a/child"}},
+                }
+            },
+            str(repo),
+        )
+
+
+def test_view_staging_failure_keeps_existing_view(tmp_path, monkeypatch):
+    home = tmp_path / "home"
+    repo = home / "dotfiles"
+    repo.mkdir(parents=True)
+    (repo / "saved").write_text("saved")
+    view = repo / "view"
+    view.mkdir()
+    marker = view / "old"
+    marker.write_text("old")
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setattr(operations, "os_name", lambda: "linux")
+    monkeypatch.setattr(
+        operations.windows,
+        "create_symlink",
+        lambda *args, **kwargs: (_ for _ in ()).throw(OSError("failed")),
+    )
+
+    with pytest.raises(OSError, match="failed"):
+        operations.view(_config("saved", "~/item"), str(repo), force=True)
+
+    assert marker.read_text() == "old"
+    assert not list(repo.glob(".view-staging-*"))
+
+
+def test_view_second_replace_failure_restores_old_view(tmp_path, monkeypatch):
+    home = tmp_path / "home"
+    repo = home / "dotfiles"
+    repo.mkdir(parents=True)
+    (repo / "saved").write_text("saved")
+    view = repo / "view"
+    view.mkdir()
+    marker = view / "old"
+    marker.write_text("old")
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setattr(operations, "os_name", lambda: "linux")
+    replace = operations.os.replace
+    calls = []
+
+    def fail_staging_replace(source, destination):
+        calls.append((source, destination))
+        if len(calls) == 2:
+            raise OSError("replace failed")
+        return replace(source, destination)
+
+    monkeypatch.setattr(operations.os, "replace", fail_staging_replace)
+
+    with pytest.raises(OSError, match="replace failed"):
+        operations.view(_config("saved", "~/item"), str(repo), force=True)
+
+    assert marker.read_text() == "old"
+    assert not list(repo.glob(".view-staging-*"))
+
+
+def test_view_backup_cleanup_failure_keeps_committed_view(tmp_path, monkeypatch):
+    home = tmp_path / "home"
+    repo = home / "dotfiles"
+    repo.mkdir(parents=True)
+    (repo / "saved").write_text("saved")
+    (repo / "view").mkdir()
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setattr(operations, "os_name", lambda: "linux")
+    rmtree = operations.shutil.rmtree
+
+    def fail_backup_cleanup(path):
+        if os.path.basename(path).startswith(".view-backup-"):
+            raise OSError("cleanup failed")
+        return rmtree(path)
+
+    monkeypatch.setattr(operations.shutil, "rmtree", fail_backup_cleanup)
+
+    result = operations.view(_config("saved", "~/item"), str(repo), force=True)
+
+    assert result.messages == ["View 1 item(s)"]
+    assert os.path.islink(
+        operations.plan_view(_config("saved", "~/item"), str(repo))[0].path
+    )
+    assert list(repo.glob(".view-backup-*"))
 
 
 def test_view_preserves_canonical_saved_symlink_and_directory_type(
@@ -1362,11 +1606,11 @@ def test_view_preserves_canonical_saved_symlink_and_directory_type(
 
     entry = operations.plan_view(config, str(repo))[0]
     operations.view(config, str(repo))
-    link = repo / "view" / "linux" / "home" / "item"
+    link = entry.path
 
     assert entry.target == str(saved)
     assert entry.is_directory is True
-    assert os.readlink(link) == os.path.relpath(saved, link.parent)
+    assert os.readlink(link) == os.path.relpath(saved, os.path.dirname(link))
 
 
 def test_view_passes_directory_flag_to_symlink(tmp_path, monkeypatch):
