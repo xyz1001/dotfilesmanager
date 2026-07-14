@@ -31,8 +31,8 @@ def _args(command, **values):
     return args
 
 
-def test_main_dispatches_add_renders_and_saves(monkeypatch):
-    result = operations.OperationResult({"dotfiles": {}}, ["added"])
+def test_main_dispatches_add_saves_then_rebuilds_view_and_renders(monkeypatch, capsys):
+    result = operations.OperationResult({"dotfiles": {"saved": {}}}, ["added"])
     monkeypatch.setattr(cli.operations, "os_name", lambda: "linux")
     monkeypatch.setattr(
         cli,
@@ -48,13 +48,126 @@ def test_main_dispatches_add_renders_and_saves(monkeypatch):
     monkeypatch.setattr(cli.operations, "validate_add", Mock(return_value=None))
     add = Mock(return_value=result)
     monkeypatch.setattr(cli.operations, "add", add)
-    save = Mock()
+    calls = []
+    save = Mock(side_effect=lambda *_: calls.append("save"))
     monkeypatch.setattr(cli.config, "save_config", save)
+    mutation_root = Mock(return_value=None)
+    monkeypatch.setattr(cli.operations, "validate_view_mutation_root", mutation_root)
+    view = Mock(
+        side_effect=lambda *_args, **_kwargs: (
+            calls.append("view")
+            or operations.OperationResult(result.config, ["viewed"])
+        )
+    )
+    monkeypatch.setattr(cli.operations, "view", view)
 
     cli.main()
 
     add.assert_called_once_with("/home/item", True, {"dotfiles": {}}, "/repo", {})
     save.assert_called_once_with("/repo", result.config)
+    mutation_root.assert_called_once_with("/repo")
+    view.assert_called_once_with(result.config, "/repo", force=True)
+    assert calls == ["save", "view"]
+    assert capsys.readouterr().out == "added\nviewed\n"
+
+
+def test_auto_view_failure_keeps_saved_config_and_reports_repair(monkeypatch):
+    result = operations.OperationResult({"dotfiles": {"saved": {}}}, ["added"])
+    monkeypatch.setattr(cli.operations, "os_name", lambda: "linux")
+    monkeypatch.setattr(
+        cli,
+        "docopt",
+        Mock(
+            return_value=_args("add", **{"<install_path>": "~/item", "--system": True})
+        ),
+    )
+    monkeypatch.setattr(cli.config, "default_dotfiles_root", Mock(return_value="/repo"))
+    monkeypatch.setattr(cli.config, "load_config", Mock(return_value={"dotfiles": {}}))
+    monkeypatch.setattr(
+        cli.operations, "normalize_path", Mock(return_value="/home/item")
+    )
+    monkeypatch.setattr(cli.operations, "validate_add", Mock(return_value=None))
+    monkeypatch.setattr(cli.operations, "add", Mock(return_value=result))
+    save = Mock()
+    monkeypatch.setattr(cli.config, "save_config", save)
+    monkeypatch.setattr(
+        cli.operations, "validate_view_mutation_root", Mock(return_value=None)
+    )
+    rebuild_error = OSError("view failed")
+    view = Mock(side_effect=rebuild_error)
+    monkeypatch.setattr(cli.operations, "view", view)
+
+    with pytest.raises(RuntimeError, match="configuration was saved") as error:
+        cli.main()
+
+    save.assert_called_once_with("/repo", result.config)
+    view.assert_called_once_with(result.config, "/repo", force=True)
+    assert error.value.__cause__ is rebuild_error
+    assert "dfm view --force" in str(error.value)
+
+
+def test_auto_view_root_validation_failure_keeps_saved_config(monkeypatch):
+    result = operations.OperationResult({"dotfiles": {"saved": {}}}, [])
+    monkeypatch.setattr(cli.operations, "os_name", lambda: "linux")
+    monkeypatch.setattr(
+        cli,
+        "docopt",
+        Mock(
+            return_value=_args("add", **{"<install_path>": "~/item", "--system": True})
+        ),
+    )
+    monkeypatch.setattr(cli.config, "default_dotfiles_root", Mock(return_value="/repo"))
+    monkeypatch.setattr(cli.config, "load_config", Mock(return_value={"dotfiles": {}}))
+    monkeypatch.setattr(
+        cli.operations, "normalize_path", Mock(return_value="/home/item")
+    )
+    monkeypatch.setattr(cli.operations, "validate_add", Mock(return_value=None))
+    monkeypatch.setattr(cli.operations, "add", Mock(return_value=result))
+    save = Mock()
+    monkeypatch.setattr(cli.config, "save_config", save)
+    mutation_root = Mock(return_value="unsafe view root")
+    monkeypatch.setattr(cli.operations, "validate_view_mutation_root", mutation_root)
+    view = Mock()
+    monkeypatch.setattr(cli.operations, "view", view)
+
+    with pytest.raises(RuntimeError, match="configuration was saved") as error:
+        cli.main()
+
+    save.assert_called_once_with("/repo", result.config)
+    mutation_root.assert_called_once_with("/repo")
+    view.assert_not_called()
+    assert isinstance(error.value.__cause__, ValueError)
+
+
+def test_auto_view_privilege_error_uses_setup_guidance(monkeypatch, capsys):
+    result = operations.OperationResult({"dotfiles": {"saved": {}}}, [])
+    monkeypatch.setattr(cli.operations, "os_name", lambda: "windows")
+    monkeypatch.setattr(
+        cli,
+        "docopt",
+        Mock(
+            return_value=_args("add", **{"<install_path>": "~/item", "--system": True})
+        ),
+    )
+    monkeypatch.setattr(cli.config, "default_dotfiles_root", Mock(return_value="/repo"))
+    monkeypatch.setattr(cli.config, "load_config", Mock(return_value={"dotfiles": {}}))
+    monkeypatch.setattr(
+        cli.operations, "normalize_path", Mock(return_value="/home/item")
+    )
+    monkeypatch.setattr(cli.operations, "validate_add", Mock(return_value=None))
+    monkeypatch.setattr(cli.operations, "add", Mock(return_value=result))
+    monkeypatch.setattr(cli.config, "save_config", Mock())
+    monkeypatch.setattr(
+        cli.operations, "validate_view_mutation_root", Mock(return_value=None)
+    )
+    monkeypatch.setattr(
+        cli.operations, "view", Mock(side_effect=cli.windows.SymlinkPrivilegeError())
+    )
+
+    with pytest.raises(SystemExit):
+        cli.main()
+
+    assert "Run dfm setup" in capsys.readouterr().out
 
 
 def test_main_exits_on_validation_failure_without_saving(monkeypatch, capsys):
@@ -387,6 +500,11 @@ def test_remove_foreign_selection_skips_current_preflight(monkeypatch, dry_run):
     remove = Mock(return_value=result)
     monkeypatch.setattr(cli.operations, "remove", remove)
     monkeypatch.setattr(cli.config, "save_config", Mock())
+    monkeypatch.setattr(
+        cli.operations,
+        "view",
+        Mock(return_value=operations.OperationResult(result.config)),
+    )
 
     cli.main()
 
@@ -428,6 +546,11 @@ def test_remove_all_with_only_foreign_registration_validates_saved_path(
     remove = Mock(return_value=result)
     monkeypatch.setattr(cli.operations, "remove", remove)
     monkeypatch.setattr(cli.config, "save_config", Mock())
+    monkeypatch.setattr(
+        cli.operations,
+        "view",
+        Mock(return_value=operations.OperationResult(result.config)),
+    )
 
     cli.main()
 
@@ -458,7 +581,7 @@ def test_remove_all_with_only_foreign_registration_validates_saved_path(
 def test_main_dispatches_remaining_commands_and_saves(
     monkeypatch, command, values, expected
 ):
-    result = operations.OperationResult({"dotfiles": {}}, [])
+    result = operations.OperationResult({"dotfiles": {"changed": {}}}, ["changed"])
     dotfiles_config = {"dotfiles": {}}
     monkeypatch.setattr(cli.operations, "os_name", lambda: "linux")
     monkeypatch.setattr(cli, "docopt", Mock(return_value=_args(command, **values)))
@@ -490,6 +613,8 @@ def test_main_dispatches_remaining_commands_and_saves(
     monkeypatch.setattr(cli.operations, "share", share)
     save = Mock()
     monkeypatch.setattr(cli.config, "save_config", save)
+    view = Mock(return_value=operations.OperationResult(result.config, ["viewed"]))
+    monkeypatch.setattr(cli.operations, "view", view)
 
     cli.main()
 
@@ -520,11 +645,12 @@ def test_main_dispatches_remaining_commands_and_saves(
         )
         remove.assert_not_called()
         install.assert_not_called()
-    if command == "share" or command == "rm":
-        # A no-op/rejected share must not rewrite YAML.
-        save.assert_not_called()
-    else:
+    if command in ("rm", "share"):
         save.assert_called_once_with("/repo", result.config)
+        view.assert_called_once_with(result.config, "/repo", force=True)
+    else:
+        save.assert_not_called()
+        view.assert_not_called()
 
 
 @pytest.mark.parametrize(

@@ -159,6 +159,9 @@ def test_direct_share_install_and_noninteractive_target_persistence(
     home, root = _environment(tmp_path, monkeypatch)
     root.mkdir()
     install = home / ".shared"
+    stale_view = root / "view"
+    stale_view.mkdir()
+    (stale_view / "stale").write_text("stale")
     saved = root / os.path.relpath(
         operations.get_save_path(str(install), False, str(root)), root
     )
@@ -178,6 +181,7 @@ def test_direct_share_install_and_noninteractive_target_persistence(
     assert install.is_symlink()
     data = config.load_config(str(root))
     assert data["dotfiles"][rel]["darwin"]["path"] == "~/.shared"
+    assert not (stale_view / "stale").exists()
 
     install.unlink()
     _run(monkeypatch, "install", saved, "--force")
@@ -209,7 +213,6 @@ def test_view_force_and_direct_partial_state_on_config_failure(tmp_path, monkeyp
     rel = os.path.relpath(saved, root).replace(os.sep, "/")
     config.save_config(str(root), {"dotfiles": {rel: {}}})
     _run(monkeypatch, "share", saved, install, "--non-interactive")
-    _run(monkeypatch, "view")
     entries = operations.plan_view(config.load_config(str(root)), str(root))
     assert len(entries) == 1
     assert os.path.islink(entries[0].path)

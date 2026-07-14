@@ -668,11 +668,21 @@ def _main():
             )
         else:
             result = operations.view(dotfiles_config, root, args.get("--force", False))
-        if command != "view" and (
-            (command != "share" or result.config != original_config)
-            and (command != "rm" or result.config != original_config)
-        ):
+        if command in ("add", "rm", "share") and result.config != original_config:
             config.save_config(root, result.config)
+            try:
+                error = operations.validate_view_mutation_root(root)
+                if error:
+                    raise ValueError(error)
+                view_result = operations.view(result.config, root, force=True)
+            except windows.SymlinkPrivilegeError:
+                raise
+            except Exception as error:
+                raise RuntimeError(
+                    "configuration was saved but view rebuild failed; "
+                    "run dfm view --force to repair"
+                ) from error
+            result.messages.extend(view_result.messages)
         return result
 
     result = run_direct()
