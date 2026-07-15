@@ -4,6 +4,8 @@ import copy
 import os
 import re
 import sys
+from dataclasses import dataclass
+from typing import Any, Dict, Optional, Set
 
 import inquirer
 from docopt import docopt
@@ -184,8 +186,14 @@ def _select_remove_systems(args, configured):
     return set(answers["systems"]).intersection(systems)
 
 
-def _select_targets(args, command, install_path, dotfiles_config, root, dry_run):
+def _select_targets(
+    args, command, install_path, dotfiles_config, root, dry_run, saved_path=None
+):
     """Validate/collect targets before a direct mutation."""
+    if saved_path is None:
+        # Compatibility for callers of this private helper predating the
+        # explicit saved_path argument.  Command preparation never relies on it.
+        saved_path = args.get("_saved")
     supplied = args.get("--target", []) or []
     # The default preserves direct callers which predate these docopt keys.
     non_interactive = args.get("--non-interactive", True)
@@ -197,7 +205,7 @@ def _select_targets(args, command, install_path, dotfiles_config, root, dry_run)
             root,
         )
         if command == "add"
-        else operations.save_path_to_key(args["_saved"], root)
+        else operations.save_path_to_key(saved_path, root)
     )
     if command == "share" and operations.is_platform_specific_save_path(rel):
         if supplied:
@@ -331,6 +339,141 @@ def _direct_paths(
     return paths
 
 
+@dataclass
+class _PreparedCommand:
+    command: str
+    args: Dict[str, Any]
+    dotfiles_config: Dict[str, Any]
+    original_config: Dict[str, Any]
+    install: Optional[str] = None
+    path: Optional[str] = None
+    saved: Optional[str] = None
+    rm_save_path: Optional[str] = None
+    selected_remove_systems: Optional[Set[str]] = None
+    targets: Optional[Dict[str, str]] = None
+    install_approved: Optional[Dict[str, str]] = None
+    share_state: Optional[str] = None
+
+
+def _prepare_direct_command(command, args, root, dry_run):
+    """Load and validate a direct command, without performing its operation."""
+    dotfiles_config = _load_config(root)
+    errors = operations.validate_config(dotfiles_config, root)
+    if errors:
+        _fail(errors[0])
+    original_config = copy.deepcopy(dotfiles_config)
+    # Target selection merges mappings.  Keep that derived state off the loaded
+    # object so preparation remains read-only (especially for dry-runs).
+    dotfiles_config = copy.deepcopy(dotfiles_config)
+    prepared = _PreparedCommand(command, args, dotfiles_config, original_config)
+
+    if command == "view":
+        try:
+            operations.plan_view(dotfiles_config, root)
+        except ValueError as error:
+            _fail(str(error))
+        error = operations.validate_view_mutation_root(
+            root
+        ) or operations.validate_view_root(root, force=True)
+        if error:
+            _fail(error)
+        return prepared
+
+    if command == "add":
+        prepared.install = operations.normalize_path(args["<install_path>"])
+        error = operations.validate_add(
+            prepared.install, args.get("--system", False), root
+        )
+        if error:
+            _fail(error)
+    elif command == "rm":
+        prepared.path = operations.normalize_path(args["<path>"])
+        prepared.rm_save_path = operations.resolve_view_save_path(args["<path>"], root)
+        if prepared.rm_save_path == prepared.path:
+            prepared.rm_save_path = operations._remove_save_path(prepared.path, root)
+        error = operations.validate_remove(prepared.path, root, prepared.rm_save_path)
+        if error:
+            _fail(error)
+        rel_path = operations.save_path_to_key(prepared.rm_save_path, root)
+        raw_key = operations.raw_save_key(dotfiles_config, rel_path)
+        prepared.selected_remove_systems = _select_remove_systems(
+            args, dotfiles_config["dotfiles"].get(raw_key, {})
+        )
+        if prepared.selected_remove_systems is None:
+            return None
+        if operations.os_name() in prepared.selected_remove_systems:
+            error = operations.validate_remove_destination(
+                dotfiles_config, rel_path, root, args.get("--force", False)
+            )
+            if error:
+                _fail(error)
+    elif command == "share" or (
+        command == "install" and args.get("<save_path>") is not None
+    ):
+        prepared.saved = operations.resolve_view_save_path(args["<save_path>"], root)
+        error = operations.validate_saved_object(prepared.saved, root)
+        if error:
+            _fail(error)
+
+    if command == "share":
+        prepared.install = operations.normalize_path(args["<install_path>"])
+        error = operations.validate_install_target(prepared.install, root)
+        if error:
+            _fail(error)
+        error = operations.validate_share_state(
+            prepared.saved, prepared.install, dotfiles_config, root
+        )
+        if error:
+            _fail(error)
+    if command in ("add", "share"):
+        prepared.targets = _select_targets(
+            args,
+            command,
+            prepared.install,
+            dotfiles_config,
+            root,
+            dry_run,
+            prepared.saved,
+        )
+    if command == "install":
+        error = operations.validate_install_sources(
+            dotfiles_config, root, prepared.saved
+        )
+        if error:
+            _fail(error)
+        if not dry_run:
+            prepared.install_approved = _preconfirm_install(
+                prepared.saved,
+                dotfiles_config,
+                root,
+                args.get("--force", False),
+            )
+            if prepared.install_approved is None:
+                return None
+    if command == "share" and not dry_run:
+        prepared.share_state = operations._link_state(prepared.saved, prepared.install)
+        if prepared.share_state == "conflict" and not args.get("--force", False):
+            if args.get("--non-interactive", True):
+                _fail("existing install path requires --force in non-interactive mode")
+            if not _confirm_replace(prepared.install):
+                return None
+    if command != "view":
+        error = operations.validate_mutation_paths(
+            _direct_paths(
+                command,
+                args,
+                dotfiles_config,
+                root,
+                prepared.rm_save_path or prepared.saved,
+                prepared.selected_remove_systems,
+            ),
+            root,
+        )
+        if error:
+            _fail(error)
+    return prepared
+
+
 def _doctor(root):
     problems = []
     if not os.path.isdir(root):
@@ -454,228 +597,24 @@ def _main():
         ):
             _fail("add/share require --non-interactive when stdin is not a TTY")
     dry_run = args.get("--dry-run", False)
+    prepared = _prepare_direct_command(command, args, root, dry_run)
+    if prepared is None:
+        return
     if dry_run:
-        # Validation below is deliberately read-only to preserve zero writes.
-        dotfiles_config = _load_config(root)
-        errors = operations.validate_config(dotfiles_config, root)
-        if errors:
-            _fail(errors[0])
-        if command == "view":
-            try:
-                operations.plan_view(dotfiles_config, root)
-            except ValueError as error:
-                _fail(str(error))
-            error = operations.validate_view_mutation_root(
-                root
-            ) or operations.validate_view_root(root, force=True)
-            if error:
-                _fail(error)
-            print(f"Dry-run: {command}; no changes made")
-            return
-        rm_save_path = None
-        selected_remove_systems = None
-        saved = None
-        if command == "add":
-            install = operations.normalize_path(args["<install_path>"])
-            error = operations.validate_add(install, args.get("--system", False), root)
-            if error:
-                _fail(error)
-        elif command == "rm":
-            path = operations.normalize_path(args["<path>"])
-            rm_save_path = operations.resolve_view_save_path(args["<path>"], root)
-            if rm_save_path == path:
-                rm_save_path = operations._remove_save_path(path, root)
-            error = operations.validate_remove(path, root, rm_save_path)
-            if error:
-                _fail(error)
-            rel_path = operations.save_path_to_key(rm_save_path, root)
-            raw_key = operations.raw_save_key(dotfiles_config, rel_path)
-            selected_remove_systems = _select_remove_systems(
-                args, dotfiles_config["dotfiles"].get(raw_key, {})
-            )
-            if selected_remove_systems is None:
-                return
-            if operations.os_name() in selected_remove_systems:
-                error = operations.validate_remove_destination(
-                    dotfiles_config, rel_path, root, args.get("--force", False)
-                )
-                if error:
-                    _fail(error)
-        elif command == "share" or (
-            command == "install" and args.get("<save_path>") is not None
-        ):
-            saved = operations.resolve_view_save_path(args["<save_path>"], root)
-            error = operations.validate_saved_object(saved, root)
-            if error:
-                _fail(error)
-        if command == "share":
-            args["_saved"] = saved
-            error = operations.validate_install_target(
-                operations.normalize_path(args["<install_path>"]), root
-            )
-            if error:
-                _fail(error)
-            error = operations.validate_share_state(
-                saved,
-                operations.normalize_path(args["<install_path>"]),
-                dotfiles_config,
-                root,
-            )
-            if error:
-                _fail(error)
-        if command in ("add", "share"):
-            target_install = (
-                install
-                if command == "add"
-                else operations.normalize_path(args["<install_path>"])
-            )
-            _select_targets(args, command, target_install, dotfiles_config, root, True)
-        if command == "install":
-            error = operations.validate_install_sources(
-                dotfiles_config,
-                root,
-                saved,
-            )
-            if error:
-                _fail(error)
-        if command != "view":
-            error = operations.validate_mutation_paths(
-                _direct_paths(
-                    command,
-                    args,
-                    dotfiles_config,
-                    root,
-                    rm_save_path or saved,
-                    selected_remove_systems,
-                ),
-                root,
-            )
-            if error:
-                _fail(error)
         print(f"Dry-run: {command}; no changes made")
         return
 
     def run_direct():
-        dotfiles_config = _load_config(root)
-        errors = operations.validate_config(dotfiles_config, root)
-        if errors:
-            _fail(errors[0])
-        if command == "view":
-            try:
-                operations.plan_view(dotfiles_config, root)
-            except ValueError as error:
-                _fail(str(error))
-            error = operations.validate_view_mutation_root(
-                root
-            ) or operations.validate_view_root(root, force=True)
-            if error:
-                _fail(error)
-        original_config = copy.deepcopy(dotfiles_config)
-        share_state = None
-        rm_save_path = None
-        selected_remove_systems = None
-        saved = None
-        if command == "add":
-            install = operations.normalize_path(args["<install_path>"])
-            error = operations.validate_add(install, args.get("--system", False), root)
-            if error:
-                _fail(error)
-        elif command == "rm":
-            path = operations.normalize_path(args["<path>"])
-            rm_save_path = operations.resolve_view_save_path(args["<path>"], root)
-            if rm_save_path == path:
-                rm_save_path = operations._remove_save_path(path, root)
-            error = operations.validate_remove(path, root, rm_save_path)
-            if error:
-                _fail(error)
-            rel_path = operations.save_path_to_key(rm_save_path, root)
-            raw_key = operations.raw_save_key(dotfiles_config, rel_path)
-            selected_remove_systems = _select_remove_systems(
-                args, dotfiles_config["dotfiles"].get(raw_key, {})
-            )
-            if selected_remove_systems is None:
-                return None
-            if operations.os_name() in selected_remove_systems:
-                error = operations.validate_remove_destination(
-                    dotfiles_config, rel_path, root, args.get("--force", False)
-                )
-                if error:
-                    _fail(error)
-        elif command == "share" or (
-            command == "install" and args.get("<save_path>") is not None
-        ):
-            saved = operations.resolve_view_save_path(args["<save_path>"], root)
-            error = operations.validate_saved_object(saved, root)
-            if error:
-                _fail(error)
-        if command == "share":
-            args["_saved"] = saved
-            error = operations.validate_install_target(
-                operations.normalize_path(args["<install_path>"]), root
-            )
-            if error:
-                _fail(error)
-            error = operations.validate_share_state(
-                saved,
-                operations.normalize_path(args["<install_path>"]),
-                dotfiles_config,
-                root,
-            )
-            if error:
-                _fail(error)
-        targets = {}
-        install_approved = None
-        if command in ("add", "share"):
-            target_install = (
-                install
-                if command == "add"
-                else operations.normalize_path(args["<install_path>"])
-            )
-            targets = _select_targets(
-                args, command, target_install, dotfiles_config, root, False
-            )
-        if command == "install":
-            error = operations.validate_install_sources(
-                dotfiles_config,
-                root,
-                saved,
-            )
-            if error:
-                _fail(error)
-            install_approved = _preconfirm_install(
-                saved,
-                dotfiles_config,
-                root,
-                args.get("--force", False),
-            )
-            if install_approved is None:
-                return None
-        # Share must not rewrite YAML when the user declines replacement.
-        if command == "share":
-            share_install = operations.normalize_path(args["<install_path>"])
-            share_state = operations._link_state(saved, share_install)
-            if share_state == "conflict" and not args.get("--force", False):
-                if args.get("--non-interactive", True):
-                    _fail(
-                        "existing install path requires --force in non-interactive mode"
-                    )
-                if not _confirm_replace(share_install):
-                    return None
-
-        if command != "view":
-            error = operations.validate_mutation_paths(
-                _direct_paths(
-                    command,
-                    args,
-                    dotfiles_config,
-                    root,
-                    rm_save_path or saved,
-                    selected_remove_systems,
-                ),
-                root,
-            )
-            if error:
-                _fail(error)
+        dotfiles_config = prepared.dotfiles_config
+        original_config = prepared.original_config
+        install = prepared.install
+        path = prepared.path
+        saved = prepared.saved
+        rm_save_path = prepared.rm_save_path
+        selected_remove_systems = prepared.selected_remove_systems
+        targets = prepared.targets or {}
+        install_approved = prepared.install_approved
+        share_state = prepared.share_state
 
         def confirm(_):
             return True
