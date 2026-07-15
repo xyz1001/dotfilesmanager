@@ -520,7 +520,7 @@ def _install_prompt_fixture(tmp_path, names):
         saved.write_text(name)
         install = tmp_path / "home" / name
         install.parent.mkdir(exist_ok=True)
-        config["dotfiles"][key] = {"linux": {"path": str(install)}}
+        config["dotfiles"][key] = {cli.operations.os_name(): {"path": str(install)}}
         paths[key] = (saved, install)
     return root, config, paths
 
