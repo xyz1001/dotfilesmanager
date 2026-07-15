@@ -10,8 +10,7 @@ from dataclasses import dataclass
 from typing import Any, Dict, Optional, Set, cast
 
 import click
-import inquirer
-from inquirer.errors import ValidationError
+import questionary
 
 from . import config, operations, windows
 from ._types import Config
@@ -48,11 +47,30 @@ _CUSTOM = "__custom__"
 
 
 def _prompt_targets(questions):
-    """Single prompt boundary, kept separate for non-TTY-safe tests."""
+    """Ask named Questionary questions and return an Inquirer-like mapping.
+
+    Questionary's module-level ``prompt`` accepts dictionaries, whereas the
+    factories used here return ``Question`` instances.  Keep that difference
+    at this boundary so the rest of the CLI can continue to deal in named
+    answers.
+    """
     try:
-        return inquirer.prompt(questions)
+        answers = {}
+        for question in questions:
+            answer = question.ask()
+            if answer is None:
+                return None
+            answers[question.name] = answer
+        return answers
     except (EOFError, KeyboardInterrupt):
         return None
+
+
+def _named_question(factory, name, **kwargs):
+    """Create a Questionary question and attach the CLI answer name."""
+    question = factory(**kwargs)
+    question.name = name
+    return question
 
 
 def _target_wizard(install_path, configured, dry_run=False):
@@ -65,13 +83,22 @@ def _target_wizard(install_path, configured, dry_run=False):
     ]
     answers = _prompt_targets(
         [
-            inquirer.Checkbox(
+            _named_question(
+                questionary.checkbox,
                 "systems",
                 message="Select target systems",
-                choices=[(_SYSTEM_LABELS.get(current, current), current)]
-                + [(_SYSTEM_LABELS[system], system) for system in available],
-                default=[current],
-                locked=[current],
+                choices=[
+                    questionary.Choice(
+                        _SYSTEM_LABELS.get(current, current),
+                        value=current,
+                        disabled=True,
+                        checked=True,
+                    )
+                ]
+                + [
+                    questionary.Choice(_SYSTEM_LABELS[system], value=system)
+                    for system in available
+                ],
             )
         ]
     )
@@ -89,10 +116,17 @@ def _target_wizard(install_path, configured, dry_run=False):
         while True:
             answers = _prompt_targets(
                 [
-                    inquirer.List(
+                    _named_question(
+                        questionary.select,
                         "path",
                         message=f"Target path for {system_label}",
-                        choices=[*candidates, ("Custom path", _CUSTOM)],
+                        choices=[
+                            *[
+                                questionary.Choice(label, value=value)
+                                for label, value in candidates
+                            ],
+                            questionary.Choice("Custom path", value=_CUSTOM),
+                        ],
                         default=candidates[0][1],
                     )
                 ]
@@ -103,17 +137,18 @@ def _target_wizard(install_path, configured, dry_run=False):
             if path != _CUSTOM:
                 break
 
-            def validate(_, value, target_system=system):
+            def validate(value, target_system=system):
                 if not value or not value.strip():
                     return True
                 error = operations.validate_foreign_target(target_system, value)
                 if error:
-                    raise ValidationError(value, reason=error)
+                    return error
                 return True
 
             answers = _prompt_targets(
                 [
-                    inquirer.Text(
+                    _named_question(
+                        questionary.text,
                         "custom_path",
                         message=f"Custom path for {system_label}",
                         validate=validate,
@@ -134,7 +169,14 @@ def _target_wizard(install_path, configured, dry_run=False):
     if dry_run:
         return selected
     answers = _prompt_targets(
-        [inquirer.Confirm("confirm", message="Apply target plan?", default=False)]
+        [
+            _named_question(
+                questionary.confirm,
+                "confirm",
+                message="Apply target plan?",
+                default=False,
+            )
+        ]
     )
     if not answers or not answers.get("confirm", False):
         return None
@@ -151,13 +193,18 @@ def _select_remove_systems(args, configured):
         return {current}
     answers = _prompt_targets(
         [
-            inquirer.Checkbox(
+            _named_question(
+                questionary.checkbox,
                 "systems",
                 message="Select systems to remove",
                 choices=[
-                    (_SYSTEM_LABELS.get(system, system), system) for system in systems
+                    questionary.Choice(
+                        _SYSTEM_LABELS.get(system, system),
+                        value=system,
+                        checked=system == current,
+                    )
+                    for system in systems
                 ],
-                default=[current] if current in configured else [],
             )
         ]
     )
@@ -240,10 +287,14 @@ def _preconfirm_install(abs_save_path, dotfiles_config, root, force):
         return approved
     answers = _prompt_targets(
         [
-            inquirer.Checkbox(
+            _named_question(
+                questionary.checkbox,
                 "paths",
                 message="Select destination paths to replace",
-                choices=[(install, rel_path) for rel_path, install, _ in conflicts],
+                choices=[
+                    questionary.Choice(install, value=rel_path)
+                    for rel_path, install, _ in conflicts
+                ],
             )
         ]
     )

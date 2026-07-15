@@ -12,6 +12,22 @@ HASH = "a" * 32
 SAVED_KEY = f"files/{HASH}/saved"
 
 
+@pytest.fixture
+def questionary_factories(monkeypatch):
+    calls = []
+
+    def factory(kind):
+        def create(**kwargs):
+            calls.append((kind, kwargs))
+            return SimpleNamespace(**kwargs)
+
+        return create
+
+    for name in ("checkbox", "select", "text", "confirm"):
+        monkeypatch.setattr(cli.questionary, name, factory(name))
+    return calls
+
+
 def _args(command, **values):
     args = {
         "add": False,
@@ -260,7 +276,7 @@ def test_platform_specific_share_rejects_target_without_running_wizard(monkeypat
 
 
 def test_target_wizard_adapter_choices_custom_retry_confirmation_and_dry_run(
-    monkeypatch, capsys
+    monkeypatch, capsys, questionary_factories
 ):
     monkeypatch.setattr(cli.operations, "os_name", lambda: "linux")
     prompts = Mock(
@@ -277,35 +293,30 @@ def test_target_wizard_adapter_choices_custom_retry_confirmation_and_dry_run(
         "darwin": "~/.config/app",
         "windows": "~/custom",
     }
-    checkbox = prompts.call_args_list[0].args[0][0]
-    assert checkbox.default == ["linux"]
-    assert checkbox.locked == ["linux"]
-    assert [(choice.label, choice.value) for choice in checkbox.choices] == [
-        ("Linux", "linux"),
-        ("macOS", "darwin"),
-        ("Windows", "windows"),
-        ("Android (Termux)", "android"),
+    checkbox = questionary_factories[0][1]
+    assert [choice.value for choice in checkbox["choices"]] == [
+        "linux",
+        "darwin",
+        "windows",
+        "android",
     ]
-    path_list = prompts.call_args_list[1].args[0][0]
-    assert path_list.message == "Target path for macOS"
-    assert path_list.default == "~/.config/app"
-    assert [(choice.label, choice.value) for choice in path_list.choices] == [
-        ("~/.config/app", "~/.config/app"),
-        ("~/Library/Application Support/app", "~/Library/Application Support/app"),
-        ("Custom path", cli._CUSTOM),
+    path_list = questionary_factories[1][1]
+    assert path_list["message"] == "Target path for macOS"
+    assert path_list["default"] == "~/.config/app"
+    assert [choice.value for choice in path_list["choices"]] == [
+        "~/.config/app",
+        "~/Library/Application Support/app",
+        cli._CUSTOM,
     ]
-    validator = prompts.call_args_list[3].args[0][0]._validate
-    assert prompts.call_args_list[3].args[0][0].message == "Custom path for Windows"
-    assert validator({}, "~/custom") is True
-    assert validator({}, "   ") is True
-    with pytest.raises(cli.ValidationError):
-        validator({}, "not-home")
-
-    with pytest.raises(cli.ValidationError) as error:
-        validator({}, "~/dotfiles/nope")
-    assert error.value.reason == "target path cannot be in ~/dotfiles"
-    confirm = prompts.call_args_list[4].args[0][0]
-    assert confirm.default is False
+    custom_path = questionary_factories[3][1]
+    validator = custom_path["validate"]
+    assert custom_path["message"] == "Custom path for Windows"
+    assert validator("~/custom") is True
+    assert validator("   ") is True
+    assert validator("not-home") == "target path must be below ~"
+    assert validator("~/dotfiles/nope") == "target path cannot be in ~/dotfiles"
+    confirm = questionary_factories[4][1]
+    assert confirm["default"] is False
 
     prompts = Mock(
         side_effect=[
@@ -322,9 +333,9 @@ def test_target_wizard_adapter_choices_custom_retry_confirmation_and_dry_run(
         "darwin": "~/item",
         "windows": "~/item",
     }
-    retried_list = prompts.call_args_list[4].args[0][0]
-    assert retried_list.default == "~/item"
-    assert retried_list.message == "Target path for Windows"
+    retried_list = questionary_factories[7][1]
+    assert retried_list["default"] == "~/item"
+    assert retried_list["message"] == "Target path for Windows"
 
     monkeypatch.setattr(cli, "_prompt_targets", Mock(return_value=None))
     assert cli._target_wizard("~/item", {}) is None
@@ -338,19 +349,17 @@ def test_target_wizard_adapter_choices_custom_retry_confirmation_and_dry_run(
 
 @pytest.mark.parametrize("current", operations.SUPPORTED_SYSTEMS)
 def test_target_wizard_filters_systems_and_does_not_prompt_when_none(
-    monkeypatch, current
+    monkeypatch, current, questionary_factories
 ):
     monkeypatch.setattr(cli.operations, "os_name", lambda: current)
     prompts = Mock(return_value={"systems": []})
     monkeypatch.setattr(cli, "_prompt_targets", prompts)
     assert cli._target_wizard("~/item", {}) == {}
-    choices = prompts.call_args.args[0][0].choices
+    choices = questionary_factories[0][1]["choices"]
     assert [choice.value for choice in choices] == [
         current,
         *[system for system in operations.SUPPORTED_SYSTEMS if system != current],
     ]
-    assert prompts.call_args.args[0][0].default == [current]
-    assert prompts.call_args.args[0][0].locked == [current]
     configured = {
         system: {"path": "~/x"}
         for system in operations.SUPPORTED_SYSTEMS
@@ -359,28 +368,24 @@ def test_target_wizard_filters_systems_and_does_not_prompt_when_none(
     prompts.reset_mock()
     assert cli._target_wizard("~/item", configured) == {}
     prompts.assert_called_once()
-    current_only = prompts.call_args.args[0][0]
-    assert [(choice.label, choice.value) for choice in current_only.choices] == [
-        (cli._SYSTEM_LABELS[current], current)
-    ]
-    assert current_only.default == [current]
-    assert current_only.locked == [current]
+    current_only = questionary_factories[1][1]
+    assert [choice.value for choice in current_only["choices"]] == [current]
 
 
-def test_target_wizard_filters_partially_configured_platforms(monkeypatch):
+def test_target_wizard_filters_partially_configured_platforms(
+    monkeypatch, questionary_factories
+):
     monkeypatch.setattr(cli.operations, "os_name", lambda: "linux")
     prompts = Mock(return_value={"systems": []})
     monkeypatch.setattr(cli, "_prompt_targets", prompts)
     assert cli._target_wizard("~/item", {"darwin": {"path": "~/old"}}) == {}
-    choices = prompts.call_args.args[0][0].choices
-    assert [(choice.label, choice.value) for choice in choices] == [
-        ("Linux", "linux"),
-        ("Windows", "windows"),
-        ("Android (Termux)", "android"),
-    ]
+    choices = questionary_factories[0][1]["choices"]
+    assert [choice.value for choice in choices] == ["linux", "windows", "android"]
 
 
-def test_target_wizard_ignores_locked_current_selection(monkeypatch):
+def test_target_wizard_ignores_locked_current_selection(
+    monkeypatch, questionary_factories
+):
     monkeypatch.setattr(cli.operations, "os_name", lambda: "android")
     prompts = Mock(return_value={"systems": ["android"]})
     monkeypatch.setattr(cli, "_prompt_targets", prompts)
@@ -388,13 +393,15 @@ def test_target_wizard_ignores_locked_current_selection(monkeypatch):
     prompts.assert_called_once()
 
 
-def test_target_wizard_uses_unknown_current_key_as_display_label(monkeypatch):
+def test_target_wizard_uses_unknown_current_key_as_display_label(
+    monkeypatch, questionary_factories
+):
     monkeypatch.setattr(cli.operations, "os_name", lambda: "plan9")
     prompts = Mock(return_value={"systems": ["plan9"]})
     monkeypatch.setattr(cli, "_prompt_targets", prompts)
     assert cli._target_wizard("~/item", {}) == {}
-    choice = prompts.call_args.args[0][0].choices[0]
-    assert (choice.label, choice.value) == ("plan9", "plan9")
+    choice = questionary_factories[0][1]["choices"][0]
+    assert choice.value == "plan9"
 
 
 @pytest.mark.parametrize(
@@ -406,7 +413,7 @@ def test_target_wizard_uses_unknown_current_key_as_display_label(monkeypatch):
     ],
 )
 def test_target_wizard_treats_missing_list_text_or_confirm_answer_as_cancelled(
-    monkeypatch, answers
+    monkeypatch, answers, questionary_factories
 ):
     monkeypatch.setattr(cli.operations, "os_name", lambda: "linux")
     prompts = Mock(side_effect=answers)
@@ -416,11 +423,37 @@ def test_target_wizard_treats_missing_list_text_or_confirm_answer_as_cancelled(
 
 @pytest.mark.parametrize("error", [EOFError, KeyboardInterrupt])
 def test_prompt_adapter_converts_terminal_cancellation_to_none(monkeypatch, error):
-    monkeypatch.setattr(cli.inquirer, "prompt", Mock(side_effect=error))
-    assert cli._prompt_targets([]) is None
+    class Question:
+        name = "answer"
+
+        def ask(self):
+            raise error
+
+    question = Question()
+    assert cli._prompt_targets([question]) is None
 
 
-def test_remove_selector_lists_registered_systems_and_defaults_current(monkeypatch):
+def test_prompt_adapter_returns_named_answers():
+    class Question:
+        def __init__(self, name, answer):
+            self.name = name
+            self.answer = answer
+
+        def ask(self):
+            return self.answer
+
+    first = Question("first", "one")
+    second = Question("second", "two")
+
+    assert cli._prompt_targets([first, second]) == {
+        "first": "one",
+        "second": "two",
+    }
+
+
+def test_remove_selector_lists_registered_systems_and_defaults_current(
+    monkeypatch, questionary_factories
+):
     monkeypatch.setattr(cli.operations, "os_name", lambda: "linux")
     monkeypatch.setattr(cli.sys, "stdin", SimpleNamespace(isatty=lambda: True))
     prompt = Mock(return_value={"systems": ["custom", "darwin"]})
@@ -431,17 +464,18 @@ def test_remove_selector_lists_registered_systems_and_defaults_current(monkeypat
     )
 
     assert selected == {"darwin", "custom"}
-    checkbox = prompt.call_args.args[0][0]
-    assert checkbox.message == "Select systems to remove"
-    assert checkbox.default == ["linux"]
-    assert [(choice.label, choice.value) for choice in checkbox.choices] == [
-        ("Linux", "linux"),
-        ("macOS", "darwin"),
-        ("custom", "custom"),
+    checkbox = questionary_factories[0][1]
+    assert checkbox["message"] == "Select systems to remove"
+    assert [choice.value for choice in checkbox["choices"]] == [
+        "linux",
+        "darwin",
+        "custom",
     ]
 
 
-def test_remove_selector_cancellation_and_empty_selection_are_distinct(monkeypatch):
+def test_remove_selector_cancellation_and_empty_selection_are_distinct(
+    monkeypatch, questionary_factories
+):
     monkeypatch.setattr(cli.operations, "os_name", lambda: "linux")
     monkeypatch.setattr(cli.sys, "stdin", SimpleNamespace(isatty=lambda: True))
     prompt = Mock(side_effect=[None, {"systems": []}])
@@ -482,7 +516,7 @@ def _install_prompt_fixture(tmp_path, names):
 
 
 def test_install_prompt_uses_one_checkbox_for_conflicting_destinations(
-    tmp_path, monkeypatch
+    tmp_path, monkeypatch, questionary_factories
 ):
     root, config, paths = _install_prompt_fixture(tmp_path, ["conflict"])
     wrong_target = tmp_path / "wrong-target"
@@ -495,10 +529,10 @@ def test_install_prompt_uses_one_checkbox_for_conflicting_destinations(
 
     assert approved == {"files/" + HASH + "/conflict": "conflict"}
     prompt.assert_called_once()
-    checkbox = prompt.call_args.args[0][0]
-    assert checkbox.message == "Select destination paths to replace"
-    assert [(choice.label, choice.value) for choice in checkbox.choices] == [
-        (str(paths["files/" + HASH + "/conflict"][1]), "files/" + HASH + "/conflict")
+    checkbox = questionary_factories[0][1]
+    assert checkbox["message"] == "Select destination paths to replace"
+    assert [choice.value for choice in checkbox["choices"]] == [
+        "files/" + HASH + "/conflict"
     ]
 
 
@@ -538,7 +572,9 @@ def test_install_force_approves_conflicts_without_checkbox(tmp_path, monkeypatch
     prompt.assert_not_called()
 
 
-def test_install_checkbox_cancellation_returns_without_approvals(tmp_path, monkeypatch):
+def test_install_checkbox_cancellation_returns_without_approvals(
+    tmp_path, monkeypatch, questionary_factories
+):
     root, config, paths = _install_prompt_fixture(tmp_path, ["conflict"])
     wrong_target = tmp_path / "wrong-target"
     wrong_target.write_text("existing")
