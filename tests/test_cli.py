@@ -660,8 +660,10 @@ def test_main_dispatches_remaining_commands_and_saves(
 
     operation, paths = expected
     if operation == "remove":
+        import os
+
         cli.operations.validate_remove.assert_called_once_with(
-            "/path", "/repo", "/path"
+            "/path", "/repo", os.path.abspath("/path")
         )
         remove.assert_called_once_with(
             *paths,
@@ -669,7 +671,7 @@ def test_main_dispatches_remaining_commands_and_saves(
             "/repo",
             False,
             True,
-            "/path",
+            os.path.abspath("/path"),
             selected_systems=set(),
         )
         install.assert_not_called()
