@@ -37,7 +37,17 @@ _UniqueKeyLoader.add_constructor(
 
 def default_dotfiles_root() -> str:
     """Return the directory that stores managed dotfiles."""
-    return os.path.join(os.path.expanduser("~"), "dotfiles")
+    root = os.environ.get("DFM_ROOT") or os.path.join(
+        os.path.expanduser("~"), "dotfiles"
+    )
+    return operations.normalize_path(root)
+
+
+def resolve_dotfiles_root(root: Optional[str] = None) -> str:
+    """Resolve a root override, falling back to the environment/default root."""
+    if root is not None:
+        return operations.normalize_path(root)
+    return default_dotfiles_root()
 
 
 def load_config(dotfiles_root: str) -> RawConfig:

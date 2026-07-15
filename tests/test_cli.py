@@ -889,6 +889,28 @@ def test_click_target_forms_are_ordered_and_root_options_merge(monkeypatch):
     assert seen[0]["--dry-run"] is True
 
 
+def test_click_root_option_is_passed_to_runner(monkeypatch):
+    seen = []
+    monkeypatch.setattr(cli, "_run_parsed_command", seen.append)
+
+    result = CliRunner().invoke(cli.click_app, ["-r", "custom", "view"])
+
+    assert result.exit_code == 0
+    assert seen[0]["--root"] == "custom"
+
+
+def test_cli_root_takes_priority_over_dfm_root(monkeypatch, tmp_path):
+    selected = []
+    monkeypatch.setenv("DFM_ROOT", str(tmp_path / "environment"))
+    monkeypatch.setattr(cli, "_doctor", selected.append)
+
+    cli._run_parsed_command(
+        _args("doctor", **{"--root": str(tmp_path / "command-line")})
+    )
+
+    assert selected == [str(tmp_path / "command-line")]
+
+
 @pytest.mark.parametrize(
     "arguments",
     [
@@ -934,8 +956,7 @@ def test_click_root_help_contract_describes_workflow_and_commands():
         assert output_lines.count(f"  {example}") == 1
     for command in ("add", "install", "share", "rm", "view", "doctor", "setup"):
         assert command in result.output
-    # Compatibility options remain accepted at the root, but are not listed as options.
-    assert "Options:\n  -h, --help" in result.output
+    assert "-r, --root DIR" in result.output
 
 
 @pytest.mark.parametrize(

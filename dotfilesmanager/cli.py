@@ -592,6 +592,7 @@ def _build_command_args(command, root_options, command_options):
             "--dry-run": values.get("dry_run", False),
             "--force": values.get("force", False),
             "--all": values.get("all", False),
+            "--root": values.get("root"),
             "<install_path>": command_options.get("install_path"),
             "<save_path>": command_options.get("save_path"),
             "<path>": command_options.get("path"),
@@ -607,6 +608,13 @@ def _run_click_command(ctx, command, **command_options):
 
 def _root_click_options(function):
     for option in (
+        click.option(
+            "-r",
+            "--root",
+            metavar="DIR",
+            type=click.Path(),
+            help="Directory used to store managed dotfiles.",
+        ),
         click.option("--all", "all", is_flag=True, hidden=True),
         click.option("--force", is_flag=True, hidden=True),
         click.option("--dry-run", "dry_run", is_flag=True, hidden=True),
@@ -793,7 +801,7 @@ def _run_parsed_command(args):
         if not result.success:
             raise SystemExit(-1)
         return
-    root = config.default_dotfiles_root()
+    root = config.resolve_dotfiles_root(args.get("--root"))
     if args.get("doctor"):
         _doctor(root)
         return

@@ -45,6 +45,23 @@ def test_default_dotfiles_root_uses_home(tmp_path, monkeypatch):
     assert config.default_dotfiles_root() == str(tmp_path / "home" / "dotfiles")
 
 
+def test_default_dotfiles_root_uses_dfm_root(tmp_path, monkeypatch):
+    monkeypatch.setenv("DFM_ROOT", "~/custom-dotfiles")
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+
+    assert config.default_dotfiles_root() == str(tmp_path / "home" / "custom-dotfiles")
+
+
+def test_resolve_dotfiles_root_expands_relative_and_user_paths(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+
+    assert config.resolve_dotfiles_root("relative/custom") == str(
+        tmp_path / "relative" / "custom"
+    )
+    assert config.resolve_dotfiles_root("~/custom") == str(tmp_path / "home" / "custom")
+
+
 def test_save_config_writes_unix_newlines_and_loads_data(tmp_path):
     data = {
         "label": "café",
