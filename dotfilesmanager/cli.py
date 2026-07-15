@@ -15,7 +15,7 @@ USAGE = """
 dotfile管理工具(dotfiles manager)，dotfile指保存配置信息的文件或包含配置文件的文件夹
 
 Usage:
-    dfm add <install_path> [--system] [--non-interactive] [--target=<mapping>...] [--dry-run] [--force]
+    dfm add <install_path> [--system] [--encrypt] [--non-interactive] [--target=<mapping>...] [--dry-run] [--force]
     dfm rm <path> [--all] [--dry-run] [--force]
     dfm install [<save_path>] [--dry-run] [--force]
     dfm share <save_path> <install_path> [--non-interactive] [--target=<mapping>...] [--dry-run] [--force]
@@ -26,6 +26,7 @@ Usage:
 Options:
     -h --help  显示帮助
     --system   该dotfile和操作系统相关
+    --encrypt  Encrypt the newly saved object with git-crypt.
     --non-interactive  Never read stdin; required for --target and non-TTY use.
     --target=<mapping>  Foreign target mapping, repeated as SYSTEM=~/path.
     --dry-run  Validate and show what would be changed without writing.
@@ -681,7 +682,12 @@ def _main():
 
         if command == "add":
             result = operations.add(
-                install, args.get("--system", False), dotfiles_config, root, targets
+                install,
+                args.get("--system", False),
+                dotfiles_config,
+                root,
+                targets,
+                encrypt=args.get("--encrypt", False),
             )
         elif command == "rm":
             result = operations.remove(

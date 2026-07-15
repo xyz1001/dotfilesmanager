@@ -1022,17 +1022,59 @@ def _make_link(target, link, confirm_replace):
     return True
 
 
-def add(install_path, system, config, dotfiles_root, targets=None):
+def _git_crypt_rule(rel_save_path, is_directory):
+    rule_path = str(rel_save_path).replace("\\", "/")
+    return f"{rule_path}{'/**' if is_directory else ''} filter=git-crypt diff=git-crypt"
+
+
+def _ensure_git_crypt_attributes(root, rel_save_path, is_directory):
+    attributes_path = os.path.join(root, ".gitattributes")
+    rule = _git_crypt_rule(rel_save_path, is_directory)
+    if os.path.exists(attributes_path):
+        contents = open(attributes_path, encoding="utf-8").read()
+        if rule in contents.splitlines():
+            return
+    else:
+        contents = ""
+    with open(attributes_path, "a", encoding="utf-8") as attributes:
+        if contents and not contents.endswith("\n"):
+            attributes.write("\n")
+        attributes.write(rule + "\n")
+
+
+def _remove_git_crypt_attribute(root, rel_save_path, is_directory):
+    attributes_path = os.path.join(root, ".gitattributes")
+    if not os.path.exists(attributes_path):
+        return
+    rule = _git_crypt_rule(rel_save_path, is_directory)
+    with open(attributes_path, encoding="utf-8") as attributes:
+        lines = attributes.readlines()
+    remaining = [line for line in lines if line.rstrip("\r\n") != rule]
+    if remaining != lines:
+        with open(attributes_path, "w", encoding="utf-8") as attributes:
+            attributes.writelines(remaining)
+
+
+def add(install_path, system, config, dotfiles_root, targets=None, encrypt=False):
     error = validate_add(install_path, system, dotfiles_root)
     if error:
         raise ValueError(error)
+    if encrypt and shutil.which("git-crypt") is None:
+        raise ValueError("git-crypt is not installed; install git-crypt and retry")
     abs_save_path = get_save_path(install_path, system, dotfiles_root)
+    rel_save_path = save_path_to_key(abs_save_path, dotfiles_root)
+    os.makedirs(dotfiles_root, exist_ok=True)
+    if encrypt:
+        _ensure_git_crypt_attributes(
+            dotfiles_root, rel_save_path, os.path.isdir(install_path)
+        )
     os.makedirs(os.path.dirname(abs_save_path), exist_ok=True)
     shutil.move(install_path, abs_save_path)
     windows.create_symlink(
-        abs_save_path, install_path, target_is_directory=os.path.isdir(abs_save_path)
+        abs_save_path,
+        install_path,
+        target_is_directory=os.path.isdir(abs_save_path),
     )
-    rel_save_path = save_path_to_key(abs_save_path, dotfiles_root)
     updated = set_path(copy.deepcopy(config), rel_save_path, install_path)
     updated = merge_targets(updated, rel_save_path, targets or {})
     return OperationResult(
@@ -1060,11 +1102,13 @@ def remove(
         install_path = get_path(config, rel_save_path)
         if install_path is None:
             if raw_key is not None:
+                is_directory = os.path.isdir(abs_save_path)
                 if os.path.islink(abs_save_path) or os.path.isfile(abs_save_path):
                     os.unlink(abs_save_path)
                 else:
                     shutil.rmtree(abs_save_path)
                 del config["dotfiles"][raw_key]
+                _remove_git_crypt_attribute(dotfiles_root, rel_save_path, is_directory)
                 return OperationResult(config, [f"Remove {rel_save_path}"])
             return OperationResult(config)
 
@@ -1081,9 +1125,11 @@ def remove(
                 os.unlink(install_path)
             else:
                 shutil.rmtree(install_path)
+        is_directory = os.path.isdir(abs_save_path)
         del config["dotfiles"][raw_key][os_name()]
         shutil.move(abs_save_path, install_path)
         del config["dotfiles"][raw_key]
+        _remove_git_crypt_attribute(dotfiles_root, rel_save_path, is_directory)
         return OperationResult(config, [f"Remove {rel_save_path}"])
 
     systems = config["dotfiles"].get(raw_key)
@@ -1098,11 +1144,13 @@ def remove(
         for system in selected:
             del systems[system]
         if not systems:
+            is_directory = os.path.isdir(abs_save_path)
             if os.path.islink(abs_save_path) or os.path.isfile(abs_save_path):
                 os.unlink(abs_save_path)
             else:
                 shutil.rmtree(abs_save_path)
             del config["dotfiles"][raw_key]
+            _remove_git_crypt_attribute(dotfiles_root, rel_save_path, is_directory)
         return OperationResult(config, [f"Remove {rel_save_path}"])
 
     install_path = get_path(config, rel_save_path)
@@ -1127,8 +1175,10 @@ def remove(
         else:
             shutil.copytree(abs_save_path, install_path)
     else:
+        is_directory = os.path.isdir(abs_save_path)
         shutil.move(abs_save_path, install_path)
         del config["dotfiles"][raw_key]
+        _remove_git_crypt_attribute(dotfiles_root, rel_save_path, is_directory)
     return OperationResult(config, [f"Remove {rel_save_path}"])
 
 

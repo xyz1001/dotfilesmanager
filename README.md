@@ -59,6 +59,14 @@ dfm add ~/.bashrc
 > dfm add ~/.bashrc --system
 > ```
 
+### 🔐 使用 git-crypt 加密新配置
+
+请先安装并自行准备、解锁 git-crypt，再使用 `--encrypt`：
+
+```bash
+dfm add ~/.secret-config --encrypt
+```
+
 ### 🔄 场景二：在新机器或新系统上恢复配置
 
 将你的 `~/dotfiles` 仓库克隆到新机器后，一键重建所有符号链接：

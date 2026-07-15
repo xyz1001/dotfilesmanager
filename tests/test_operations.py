@@ -312,6 +312,72 @@ def test_add_moves_file_creates_absolute_link_and_records_posix_path(
     assert result.messages == [f"Add {install_path} to {rel_saved}"]
 
 
+def test_add_encrypt_adds_file_attribute_rule(tmp_path, monkeypatch):
+    home = tmp_path / "home"
+    install = home / ".config" / "app"
+    install.parent.mkdir(parents=True)
+    install.write_text("settings")
+    repo = home / "dotfiles"
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setattr(operations.shutil, "which", lambda name: "/usr/bin/git-crypt")
+    operations.add(str(install), False, {"dotfiles": {}}, str(repo), encrypt=True)
+
+    key = operations.save_path_to_key(
+        operations.get_save_path(str(install), False, str(repo)), str(repo)
+    )
+    assert (repo / ".gitattributes").read_text() == (
+        f"{key} filter=git-crypt diff=git-crypt\n"
+    )
+
+
+def test_add_encrypt_missing_git_crypt_leaves_source_and_attributes_unchanged(
+    tmp_path, monkeypatch
+):
+    home = tmp_path / "home"
+    install = home / ".config" / "app"
+    install.parent.mkdir(parents=True)
+    install.write_text("settings")
+    repo = home / "dotfiles"
+    repo.mkdir()
+    attributes = repo / ".gitattributes"
+    attributes.write_text("existing rule\n")
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setattr(operations.shutil, "which", lambda name: None)
+
+    with pytest.raises(ValueError, match="install git-crypt and retry"):
+        operations.add(str(install), False, {"dotfiles": {}}, str(repo), encrypt=True)
+
+    assert install.read_text() == "settings"
+    assert attributes.read_text() == "existing rule\n"
+
+
+def test_git_crypt_attributes_preserve_and_are_idempotent(tmp_path):
+    root = tmp_path / "repo"
+    root.mkdir()
+    attributes = root / ".gitattributes"
+    attributes.write_text("unrelated pattern\nfiles/existing filter=other\n")
+
+    operations._ensure_git_crypt_attributes(root, "files/hash/item", False)
+    operations._ensure_git_crypt_attributes(root, "files/hash/item", False)
+
+    assert attributes.read_text().splitlines() == [
+        "unrelated pattern",
+        "files/existing filter=other",
+        "files/hash/item filter=git-crypt diff=git-crypt",
+    ]
+
+
+def test_git_crypt_attributes_use_directory_and_system_specific_rules(tmp_path):
+    root = tmp_path / "repo"
+    root.mkdir()
+
+    operations._ensure_git_crypt_attributes(root, "files/hash/linux/item", True)
+
+    assert (root / ".gitattributes").read_text() == (
+        "files/hash/linux/item/** filter=git-crypt diff=git-crypt\n"
+    )
+
+
 def test_save_config_omits_internal_files_namespace(tmp_path):
     repo = tmp_path / "repo"
     data = {"dotfiles": {f"files/{HASH}/saved": {"linux": {"path": "~/saved"}}}}
@@ -1195,6 +1261,13 @@ def test_remove_all_restores_local_shared_object_and_deletes_all_registrations(
     else:
         saved.mkdir()
         (saved / "settings").write_text("shared")
+    key = f"files/{HASH}/shared"
+    attributes = repo / ".gitattributes"
+    attributes.write_text(
+        "unrelated pattern\n"
+        + operations._git_crypt_rule(key, kind == "directory")
+        + "\n"
+    )
     install.symlink_to(saved, target_is_directory=kind == "directory")
     config = {
         "dotfiles": {
@@ -1215,6 +1288,7 @@ def test_remove_all_restores_local_shared_object_and_deletes_all_registrations(
         assert install.read_text() == "shared"
     else:
         assert (install / "settings").read_text() == "shared"
+    assert attributes.read_text() == "unrelated pattern\n"
 
 
 def test_remove_all_without_current_registration_never_touches_foreign_path(
@@ -1226,6 +1300,12 @@ def test_remove_all_without_current_registration_never_touches_foreign_path(
     repo.mkdir()
     saved.parent.mkdir(parents=True)
     saved.write_text("saved")
+    attributes = repo / ".gitattributes"
+    attributes.write_text(
+        "unrelated pattern\n"
+        + operations._git_crypt_rule(f"files/{HASH}/saved", False)
+        + "\n"
+    )
     config = {"dotfiles": {f"files/{HASH}/saved": {"darwin": {"path": foreign}}}}
     monkeypatch.setattr(operations, "os_name", lambda: "linux")
     original_lexists = operations.os.path.lexists
@@ -1240,6 +1320,7 @@ def test_remove_all_without_current_registration_never_touches_foreign_path(
 
     assert result.config == {"dotfiles": {}}
     assert not saved.exists()
+    assert attributes.read_text() == "unrelated pattern\n"
 
 
 def test_remove_selected_foreign_mappings_never_touches_install_paths(
@@ -1252,6 +1333,9 @@ def test_remove_selected_foreign_mappings_never_touches_install_paths(
     repo.mkdir()
     saved.parent.mkdir(parents=True)
     saved.write_text("saved")
+    attributes = repo / ".gitattributes"
+    rule = operations._git_crypt_rule(f"files/{HASH}/saved", False)
+    attributes.write_text(f"unrelated pattern\n{rule}\n")
     install.parent.mkdir()
     install.symlink_to(saved)
     config = {
@@ -1281,6 +1365,7 @@ def test_remove_selected_foreign_mappings_never_touches_install_paths(
     }
     assert saved.read_text() == "saved"
     assert install.is_symlink()
+    assert attributes.read_text() == f"unrelated pattern\n{rule}\n"
 
 
 def test_remove_selected_last_foreign_mapping_deletes_saved_object(
@@ -1291,6 +1376,12 @@ def test_remove_selected_last_foreign_mapping_deletes_saved_object(
     repo.mkdir()
     saved.parent.mkdir(parents=True)
     saved.write_text("saved")
+    attributes = repo / ".gitattributes"
+    attributes.write_text(
+        "unrelated pattern\n"
+        + operations._git_crypt_rule(f"files/{HASH}/saved", False)
+        + "\n"
+    )
     config = {"dotfiles": {f"files/{HASH}/saved": {"darwin": {"path": "~/foreign"}}}}
     monkeypatch.setattr(operations, "os_name", lambda: "linux")
 
@@ -1300,6 +1391,7 @@ def test_remove_selected_last_foreign_mapping_deletes_saved_object(
 
     assert result.config == {"dotfiles": {}}
     assert not saved.exists()
+    assert attributes.read_text() == "unrelated pattern\n"
 
 
 def test_remove_selected_current_and_foreign_mappings(tmp_path, monkeypatch):
@@ -1309,6 +1401,12 @@ def test_remove_selected_current_and_foreign_mappings(tmp_path, monkeypatch):
     repo.mkdir()
     saved.parent.mkdir(parents=True)
     saved.write_text("saved")
+    attributes = repo / ".gitattributes"
+    attributes.write_text(
+        "unrelated pattern\n"
+        + operations._git_crypt_rule(f"files/{HASH}/saved", False)
+        + "\n"
+    )
     install.parent.mkdir()
     install.symlink_to(saved)
     monkeypatch.setattr(operations, "os_name", lambda: "linux")
@@ -1342,6 +1440,12 @@ def test_remove_selected_current_and_all_mappings_moves_saved_object(
     repo.mkdir()
     saved.parent.mkdir(parents=True)
     saved.write_text("saved")
+    attributes = repo / ".gitattributes"
+    attributes.write_text(
+        "unrelated pattern\n"
+        + operations._git_crypt_rule(f"files/{HASH}/saved", False)
+        + "\n"
+    )
     install.parent.mkdir()
     install.symlink_to(saved)
     monkeypatch.setattr(operations, "os_name", lambda: "linux")
@@ -1361,6 +1465,7 @@ def test_remove_selected_current_and_all_mappings_moves_saved_object(
     assert result.config == {"dotfiles": {}}
     assert not saved.exists()
     assert install.read_text() == "saved"
+    assert attributes.read_text() == "unrelated pattern\n"
 
 
 @pytest.mark.parametrize("selected_systems", [set(), {"android"}])

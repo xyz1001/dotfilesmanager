@@ -20,6 +20,7 @@ def _args(command, **values):
         "view": False,
         "doctor": False,
         "--system": False,
+        "--encrypt": False,
         "--non-interactive": False,
         "--target": [],
         "--dry-run": False,
@@ -73,7 +74,14 @@ def test_main_dispatches_add_saves_then_rebuilds_view_and_renders(monkeypatch, c
         cli,
         "docopt",
         Mock(
-            return_value=_args("add", **{"<install_path>": "~/item", "--system": True})
+            return_value=_args(
+                "add",
+                **{
+                    "<install_path>": "~/item",
+                    "--system": True,
+                    "--encrypt": True,
+                },
+            )
         ),
     )
     monkeypatch.setattr(cli.config, "default_dotfiles_root", Mock(return_value="/repo"))
@@ -98,7 +106,9 @@ def test_main_dispatches_add_saves_then_rebuilds_view_and_renders(monkeypatch, c
 
     cli.main()
 
-    add.assert_called_once_with("/home/item", True, {"dotfiles": {}}, "/repo", {})
+    add.assert_called_once_with(
+        "/home/item", True, {"dotfiles": {}}, "/repo", {}, encrypt=True
+    )
     save.assert_called_once_with("/repo", result.config)
     mutation_root.assert_called_once_with("/repo")
     view.assert_called_once_with(result.config, "/repo", force=True)
