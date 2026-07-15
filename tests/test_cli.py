@@ -7,6 +7,9 @@ import pytest
 
 from dotfilesmanager import cli, operations
 
+HASH = "a" * 32
+SAVED_KEY = f"files/{HASH}/saved"
+
 
 def _args(command, **values):
     args = {
@@ -31,8 +34,40 @@ def _args(command, **values):
     return args
 
 
+def test_load_config_error_is_reported_without_traceback(monkeypatch, capsys):
+    monkeypatch.setattr(
+        cli.config, "load_config", Mock(side_effect=ValueError("bad yaml"))
+    )
+
+    with pytest.raises(SystemExit):
+        cli._load_config("/repo")
+
+    assert capsys.readouterr().out == "Invalid configuration: bad yaml\n"
+
+
+def test_command_reports_invalid_utf8_config_without_traceback(
+    tmp_path, monkeypatch, capsys
+):
+    root = tmp_path / "dotfiles"
+    root.mkdir()
+    (root / "dfm.yaml").write_bytes(b"\xff")
+    monkeypatch.setattr(
+        cli, "docopt", Mock(return_value=_args("view", **{"--dry-run": True}))
+    )
+    monkeypatch.setattr(
+        cli.config, "default_dotfiles_root", Mock(return_value=str(root))
+    )
+
+    with pytest.raises(SystemExit):
+        cli.main()
+
+    output = capsys.readouterr().out
+    assert "Invalid configuration: invalid dfm.yaml encoding; expected UTF-8" in output
+    assert "Traceback" not in output
+
+
 def test_main_dispatches_add_saves_then_rebuilds_view_and_renders(monkeypatch, capsys):
-    result = operations.OperationResult({"dotfiles": {"saved": {}}}, ["added"])
+    result = operations.OperationResult({"dotfiles": {SAVED_KEY: {}}}, ["added"])
     monkeypatch.setattr(cli.operations, "os_name", lambda: "linux")
     monkeypatch.setattr(
         cli,
@@ -72,7 +107,7 @@ def test_main_dispatches_add_saves_then_rebuilds_view_and_renders(monkeypatch, c
 
 
 def test_auto_view_failure_keeps_saved_config_and_reports_repair(monkeypatch):
-    result = operations.OperationResult({"dotfiles": {"saved": {}}}, ["added"])
+    result = operations.OperationResult({"dotfiles": {SAVED_KEY: {}}}, ["added"])
     monkeypatch.setattr(cli.operations, "os_name", lambda: "linux")
     monkeypatch.setattr(
         cli,
@@ -107,7 +142,7 @@ def test_auto_view_failure_keeps_saved_config_and_reports_repair(monkeypatch):
 
 
 def test_auto_view_root_validation_failure_keeps_saved_config(monkeypatch):
-    result = operations.OperationResult({"dotfiles": {"saved": {}}}, [])
+    result = operations.OperationResult({"dotfiles": {SAVED_KEY: {}}}, [])
     monkeypatch.setattr(cli.operations, "os_name", lambda: "linux")
     monkeypatch.setattr(
         cli,
@@ -140,7 +175,7 @@ def test_auto_view_root_validation_failure_keeps_saved_config(monkeypatch):
 
 
 def test_auto_view_privilege_error_uses_setup_guidance(monkeypatch, capsys):
-    result = operations.OperationResult({"dotfiles": {"saved": {}}}, [])
+    result = operations.OperationResult({"dotfiles": {SAVED_KEY: {}}}, [])
     monkeypatch.setattr(cli.operations, "os_name", lambda: "windows")
     monkeypatch.setattr(
         cli,
@@ -228,12 +263,13 @@ def test_non_tty_target_commands_require_noninteractive_without_reading_stdin(
 
 def test_platform_specific_share_rejects_target_without_running_wizard(monkeypatch):
     rel = "a" * 32 + "/linux/item"
+    key = "files/" + rel
     args = _args(
         "share",
         **{
             "--non-interactive": True,
             "--target": ["darwin=~/x"],
-            "_saved": "/repo/" + rel,
+            "_saved": "/repo/files/" + rel,
         },
     )
     monkeypatch.setattr(cli.operations, "os_name", lambda: "linux")
@@ -242,7 +278,7 @@ def test_platform_specific_share_rejects_target_without_running_wizard(monkeypat
 
     with pytest.raises(SystemExit):
         cli._select_targets(
-            args, "share", "/home/item", {"dotfiles": {rel: {}}}, "/repo", False
+            args, "share", "/home/item", {"dotfiles": {key: {}}}, "/repo", False
         )
 
     wizard.assert_not_called()
@@ -476,7 +512,7 @@ def test_remove_selector_bypasses_prompt_for_non_tty_and_all(monkeypatch):
 def test_remove_foreign_selection_skips_current_preflight(monkeypatch, dry_run):
     result = operations.OperationResult({"dotfiles": {}}, [])
     dotfiles_config = {
-        "dotfiles": {"saved": {"linux": {"path": "/install"}, "custom": {}}}
+        "dotfiles": {SAVED_KEY: {"linux": {"path": "/install"}, "custom": {}}}
     }
     monkeypatch.setattr(cli.operations, "os_name", lambda: "linux")
     monkeypatch.setattr(
@@ -489,7 +525,9 @@ def test_remove_foreign_selection_skips_current_preflight(monkeypatch, dry_run):
     monkeypatch.setattr(cli.operations, "validate_config", Mock(return_value=[]))
     monkeypatch.setattr(cli.operations, "normalize_path", Mock(return_value="/path"))
     monkeypatch.setattr(
-        cli.operations, "resolve_view_save_path", Mock(return_value="/repo/saved")
+        cli.operations,
+        "resolve_view_save_path",
+        Mock(return_value=f"/repo/{SAVED_KEY}"),
     )
     monkeypatch.setattr(cli.operations, "validate_remove", Mock(return_value=None))
     destination = Mock(return_value=None)
@@ -521,7 +559,7 @@ def test_remove_all_with_only_foreign_registration_validates_saved_path(
     monkeypatch, dry_run
 ):
     result = operations.OperationResult({"dotfiles": {}}, [])
-    dotfiles_config = {"dotfiles": {"saved": {"darwin": {}}}}
+    dotfiles_config = {"dotfiles": {SAVED_KEY: {"darwin": {}}}}
     monkeypatch.setattr(cli.operations, "os_name", lambda: "linux")
     monkeypatch.setattr(
         cli,
@@ -537,7 +575,9 @@ def test_remove_all_with_only_foreign_registration_validates_saved_path(
     monkeypatch.setattr(cli.operations, "validate_config", Mock(return_value=[]))
     monkeypatch.setattr(cli.operations, "normalize_path", Mock(return_value="/path"))
     monkeypatch.setattr(
-        cli.operations, "resolve_view_save_path", Mock(return_value="/repo/saved")
+        cli.operations,
+        "resolve_view_save_path",
+        Mock(return_value=f"/repo/{SAVED_KEY}"),
     )
     monkeypatch.setattr(cli.operations, "validate_remove", Mock(return_value=None))
     paths = Mock(return_value=None)
@@ -554,7 +594,7 @@ def test_remove_all_with_only_foreign_registration_validates_saved_path(
 
     cli.main()
 
-    paths.assert_called_once_with(["/repo/saved"], "/repo")
+    paths.assert_called_once_with([f"/repo/{SAVED_KEY}"], "/repo")
     if dry_run:
         remove.assert_not_called()
     else:
@@ -581,7 +621,7 @@ def test_remove_all_with_only_foreign_registration_validates_saved_path(
 def test_main_dispatches_remaining_commands_and_saves(
     monkeypatch, command, values, expected
 ):
-    result = operations.OperationResult({"dotfiles": {"changed": {}}}, ["changed"])
+    result = operations.OperationResult({"dotfiles": {SAVED_KEY: {}}}, ["changed"])
     dotfiles_config = {"dotfiles": {}}
     monkeypatch.setattr(cli.operations, "os_name", lambda: "linux")
     monkeypatch.setattr(cli, "docopt", Mock(return_value=_args(command, **values)))
@@ -704,7 +744,7 @@ def test_unrelated_symlink_error_remains_native(monkeypatch, capsys):
 
 
 def test_view_dispatches_without_saving_configuration(monkeypatch):
-    result = operations.OperationResult({"dotfiles": {"changed": {}}}, ["viewed"])
+    result = operations.OperationResult({"dotfiles": {SAVED_KEY: {}}}, ["viewed"])
     monkeypatch.setattr(cli.operations, "os_name", lambda: "linux")
     monkeypatch.setattr(cli, "docopt", Mock(return_value=_args("view")))
     monkeypatch.setattr(cli.config, "default_dotfiles_root", Mock(return_value="/repo"))

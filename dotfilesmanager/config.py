@@ -6,6 +6,32 @@ import tempfile
 
 import yaml
 
+from . import operations
+
+
+class _UniqueKeyLoader(yaml.SafeLoader):
+    """Safe YAML loader that rejects duplicate mapping keys."""
+
+
+def _construct_unique_mapping(loader, node, deep=False):
+    loader.flatten_mapping(node)
+    mapping = {}
+    for key_node, value_node in node.value:
+        key = loader.construct_object(key_node, deep=deep)
+        try:
+            duplicate = key in mapping
+        except TypeError as error:
+            raise ValueError("invalid YAML mapping key") from error
+        if duplicate:
+            raise ValueError(f"duplicate YAML key: {key!r}")
+        mapping[key] = loader.construct_object(value_node, deep=deep)
+    return mapping
+
+
+_UniqueKeyLoader.add_constructor(
+    yaml.resolver.BaseResolver.DEFAULT_MAPPING_TAG, _construct_unique_mapping
+)
+
 
 def default_dotfiles_root():
     """Return the directory that stores managed dotfiles."""
@@ -17,20 +43,29 @@ def load_config(dotfiles_root):
     config_path = os.path.join(dotfiles_root, "dfm.yaml")
     if not os.path.isfile(config_path):
         return {"dotfiles": {}}
-    with open(config_path) as config_file:
-        config = yaml.load(config_file, Loader=yaml.SafeLoader)
-        if "dotfiles" not in config:
-            config["dotfiles"] = {}
-        normalized = _normalize_schema_paths(config)
-        if normalized is not None:
-            config["dotfiles"] = normalized
-        return config
+    try:
+        with open(config_path, encoding="utf-8") as config_file:
+            config = yaml.load(config_file, Loader=_UniqueKeyLoader)
+    except yaml.YAMLError as error:
+        raise ValueError("invalid dfm.yaml syntax") from error
+    except UnicodeError as error:
+        raise ValueError("invalid dfm.yaml encoding; expected UTF-8") from error
+    except TypeError as error:
+        raise ValueError("invalid dfm.yaml mapping key") from error
+    if not isinstance(config, dict):
+        raise ValueError("dfm.yaml must contain a mapping")
+    if "dotfiles" not in config:
+        config["dotfiles"] = {}
+    normalized = _load_schema_paths(config)
+    if normalized is not None:
+        config["dotfiles"] = normalized
+    return config
 
 
 def save_config(dotfiles_root, config):
     """Persist a dotfile mapping atomically (and durably where supported)."""
     config_to_save = config
-    normalized = _normalize_schema_paths(config)
+    normalized = _save_schema_paths(config)
     if normalized is not None:
         config_to_save = dict(config)
         config_to_save["dotfiles"] = normalized
@@ -38,7 +73,7 @@ def save_config(dotfiles_root, config):
     config_path = os.path.join(dotfiles_root, "dfm.yaml")
     fd, temporary_path = tempfile.mkstemp(prefix=".dfm.yaml.", dir=dotfiles_root)
     try:
-        with os.fdopen(fd, "w", newline="\n") as config_file:
+        with os.fdopen(fd, "w", encoding="utf-8", newline="\n") as config_file:
             config_file.write(yaml.dump(config_to_save, Dumper=yaml.SafeDumper))
             config_file.flush()
             os.fsync(config_file.fileno())
@@ -49,24 +84,32 @@ def save_config(dotfiles_root, config):
             os.unlink(temporary_path)
 
 
-def _normalize_schema_paths(config):
-    """Return a copy-on-write canonical version of the dfm schema subtree."""
+def _canonical_saved_key(key):
+    """Return a canonical YAML saved key, accepting either separator."""
+    if not isinstance(key, str) or not key:
+        return None
+    internal = operations.canonical_save_key("files/" + key.replace("\\", "/"))
+    if internal is None:
+        return None
+    return internal[len("files/") :]
+
+
+def _load_schema_paths(config):
+    """Convert YAML saved keys to the internal ``files/`` namespace."""
     if not isinstance(config, dict) or not isinstance(config.get("dotfiles"), dict):
         return None
-    canonical_paths = set()
-    for saved_path, _systems in config["dotfiles"].items():
-        canonical_saved_path = (
-            saved_path.replace("\\", "/") if isinstance(saved_path, str) else saved_path
-        )
-        if canonical_saved_path in canonical_paths:
-            raise ValueError("normalized saved paths collide in dfm.yaml")
-        canonical_paths.add(canonical_saved_path)
-
     normalized = {}
     for saved_path, systems in config["dotfiles"].items():
-        canonical_saved_path = (
-            saved_path.replace("\\", "/") if isinstance(saved_path, str) else saved_path
-        )
+        canonical = _canonical_saved_key(saved_path)
+        if (
+            canonical is None
+            or saved_path.startswith("files/")
+            or saved_path.startswith("files\\")
+        ):
+            raise ValueError("invalid saved path in dfm.yaml")
+        internal = "files/" + canonical
+        if internal in normalized:
+            raise ValueError("normalized saved paths collide in dfm.yaml")
         if isinstance(systems, dict):
             normalized_systems = {}
             for system, item in systems.items():
@@ -77,7 +120,20 @@ def _normalize_schema_paths(config):
                     item = dict(item)
                 normalized_systems[system] = item
             systems = normalized_systems
-        normalized[canonical_saved_path] = systems
+        normalized[internal] = systems
+    return normalized
+
+
+def _save_schema_paths(config):
+    """Convert internal ``files/`` saved keys to YAML keys."""
+    if not isinstance(config, dict) or not isinstance(config.get("dotfiles"), dict):
+        return None
+    normalized = {}
+    for saved_path, systems in config["dotfiles"].items():
+        canonical = operations.canonical_save_key(saved_path)
+        if canonical is None or canonical in normalized:
+            raise ValueError("invalid internal saved path")
+        normalized[canonical[len("files/") :]] = systems
     return normalized
 
 

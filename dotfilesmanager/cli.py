@@ -43,6 +43,13 @@ def _fail(message):
     raise SystemExit(-1)
 
 
+def _load_config(root):
+    try:
+        return config.load_config(root)
+    except ValueError as error:
+        _fail(f"Invalid configuration: {error}")
+
+
 def _render(result):
     for message in result.messages:
         print(message)
@@ -184,12 +191,12 @@ def _select_targets(args, command, install_path, dotfiles_config, root, dry_run)
     if command == "add" and args.get("--system", False):
         return {}
     rel = (
-        os.path.relpath(
+        operations.save_path_to_key(
             operations.get_save_path(install_path, args.get("--system", False), root),
             root,
-        ).replace(os.sep, "/")
+        )
         if command == "add"
-        else os.path.relpath(args["_saved"], root).replace(os.sep, "/")
+        else operations.save_path_to_key(args["_saved"], root)
     )
     if command == "share" and operations.is_platform_specific_save_path(rel):
         if supplied:
@@ -207,7 +214,8 @@ def _select_targets(args, command, install_path, dotfiles_config, root, dry_run)
     else:
         if not sys.stdin.isatty():
             _fail("add/share require --non-interactive when stdin is not a TTY")
-        configured = dotfiles_config["dotfiles"].get(rel, {})
+        raw_key = operations.raw_save_key(dotfiles_config, rel)
+        configured = dotfiles_config["dotfiles"].get(raw_key, {}) if raw_key else {}
         targets = _target_wizard(install_path, configured, dry_run)
         if targets is None:
             _fail("target selection cancelled")
@@ -222,15 +230,15 @@ def _preconfirm_install(abs_save_path, dotfiles_config, root, force):
     """Collect every install replacement decision before mutation."""
     selected = None
     if abs_save_path is not None:
-        selected = os.path.relpath(abs_save_path, root).replace(os.sep, "/")
+        selected = operations.save_path_to_key(abs_save_path, root)
     approved = {}
     for rel_path in dotfiles_config["dotfiles"]:
-        if selected is not None and rel_path != selected:
+        if selected is not None and operations.canonical_save_key(rel_path) != selected:
             continue
         install = operations.get_path(dotfiles_config, rel_path)
         if install is None:
             continue
-        saved = os.path.join(root, rel_path.replace("/", os.sep))
+        saved = operations.key_to_save_path(rel_path, root)
         state = operations._link_state(saved, install)
         if state == "correct":
             continue
@@ -261,8 +269,9 @@ def _direct_paths(
             if saved is None:
                 path = operations.normalize_path(args["<path>"])
                 saved = operations._remove_save_path(path, root)
-            rel_path = os.path.relpath(saved, root).replace(os.sep, "/")
-            registered = set(dotfiles_config.get("dotfiles", {}).get(rel_path, {}))
+            rel_path = operations.save_path_to_key(saved, root)
+            raw_key = operations.raw_save_key(dotfiles_config, rel_path)
+            registered = set(dotfiles_config.get("dotfiles", {}).get(raw_key, {}))
             selected = set(selected_systems).intersection(registered)
             if not selected or selected != registered:
                 return []
@@ -272,12 +281,13 @@ def _direct_paths(
             path = operations.normalize_path(args["<path>"])
             saved = operations._remove_save_path(path, root)
         paths = [saved]
-        rel_path = os.path.relpath(saved, root).replace(os.sep, "/")
+        rel_path = operations.save_path_to_key(saved, root)
         # rm only mutates its saved object and, when registered, the current
         # platform's install path. Foreign mappings are configuration data.
+        raw_key = operations.raw_save_key(dotfiles_config, rel_path)
         item = (
             dotfiles_config.get("dotfiles", {})
-            .get(rel_path, {})
+            .get(raw_key, {})
             .get(operations.os_name())
         )
         if isinstance(item, dict) and item.get("path"):
@@ -290,10 +300,9 @@ def _direct_paths(
     paths = []
     selected = resolved_save_path or operations.normalize_path(args.get("<save_path>"))
     for rel_path in dotfiles_config["dotfiles"]:
-        if (
-            selected is not None
-            and os.path.relpath(selected, root).replace(os.sep, "/") != rel_path
-        ):
+        if selected is not None and operations.save_path_to_key(
+            selected, root
+        ) != operations.canonical_save_key(rel_path):
             continue
         install = operations.get_path(dotfiles_config, rel_path)
         if install:
@@ -306,11 +315,11 @@ def _doctor(root):
     if not os.path.isdir(root):
         _fail(f"dotfiles root does not exist: {root}")
     try:
-        dotfiles_config = config.load_config(root)
+        dotfiles_config = _load_config(root)
         problems.extend(operations.validate_config(dotfiles_config, root))
         if not problems:
             for rel_path in dotfiles_config["dotfiles"]:
-                saved = os.path.join(root, rel_path.replace("/", os.sep))
+                saved = operations.key_to_save_path(rel_path, root)
                 if not os.path.lexists(saved):
                     problems.append(f"missing saved path: {rel_path}")
                 install = operations.get_path(dotfiles_config, rel_path)
@@ -343,18 +352,30 @@ def _doctor(root):
 def _unreferenced_saved_objects(root, dotfiles_config):
     """Inspect only hash namespaces produced by get_save_path, never repo files."""
     managed = {
-        os.path.abspath(os.path.join(root, path.replace("/", os.sep)))
-        for path in dotfiles_config["dotfiles"]
+        operations.key_to_save_path(path, root) for path in dotfiles_config["dotfiles"]
     }
     problems = []
-    for namespace in os.listdir(root):
+    files_root = os.path.join(root, "files")
+    if operations._is_link_or_reparse(files_root) or not os.path.isdir(files_root):
+        return problems
+    for namespace in os.listdir(files_root):
         if not re.fullmatch(r"[0-9a-f]{32}", namespace):
             continue
-        namespace_path = os.path.join(root, namespace)
-        if not os.path.isdir(namespace_path) or os.path.islink(namespace_path):
+        namespace_path = os.path.join(files_root, namespace)
+        if not os.path.isdir(namespace_path) or operations._is_link_or_reparse(
+            namespace_path
+        ):
             continue
-        for current, directories, files in os.walk(namespace_path):
-            for name in directories + files:
+        for current, directories, files in os.walk(namespace_path, topdown=True):
+            reparse_directories = []
+            safe_directories = []
+            for name in directories:
+                if operations._is_link_or_reparse(os.path.join(current, name)):
+                    reparse_directories.append(name)
+                else:
+                    safe_directories.append(name)
+            directories[:] = safe_directories
+            for name in reparse_directories + directories + files:
                 path = os.path.abspath(os.path.join(current, name))
                 if any(
                     path == saved
@@ -414,7 +435,7 @@ def _main():
     dry_run = args.get("--dry-run", False)
     if dry_run:
         # Validation below is deliberately read-only to preserve zero writes.
-        dotfiles_config = config.load_config(root)
+        dotfiles_config = _load_config(root)
         errors = operations.validate_config(dotfiles_config, root)
         if errors:
             _fail(errors[0])
@@ -446,9 +467,10 @@ def _main():
             error = operations.validate_remove(path, root, rm_save_path)
             if error:
                 _fail(error)
-            rel_path = os.path.relpath(rm_save_path, root).replace(os.sep, "/")
+            rel_path = operations.save_path_to_key(rm_save_path, root)
+            raw_key = operations.raw_save_key(dotfiles_config, rel_path)
             selected_remove_systems = _select_remove_systems(
-                args, dotfiles_config["dotfiles"].get(rel_path, {})
+                args, dotfiles_config["dotfiles"].get(raw_key, {})
             )
             if selected_remove_systems is None:
                 return
@@ -513,7 +535,7 @@ def _main():
         return
 
     def run_direct():
-        dotfiles_config = config.load_config(root)
+        dotfiles_config = _load_config(root)
         errors = operations.validate_config(dotfiles_config, root)
         if errors:
             _fail(errors[0])
@@ -545,9 +567,10 @@ def _main():
             error = operations.validate_remove(path, root, rm_save_path)
             if error:
                 _fail(error)
-            rel_path = os.path.relpath(rm_save_path, root).replace(os.sep, "/")
+            rel_path = operations.save_path_to_key(rm_save_path, root)
+            raw_key = operations.raw_save_key(dotfiles_config, rel_path)
             selected_remove_systems = _select_remove_systems(
-                args, dotfiles_config["dotfiles"].get(rel_path, {})
+                args, dotfiles_config["dotfiles"].get(raw_key, {})
             )
             if selected_remove_systems is None:
                 return None

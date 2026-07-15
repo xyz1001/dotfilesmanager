@@ -2,10 +2,13 @@
 
 import os
 import sys
+from pathlib import Path
 
 import pytest
 
 from dotfilesmanager import cli, config, operations
+
+HASH = "a" * 32
 
 
 def _environment(tmp_path, monkeypatch):
@@ -42,7 +45,8 @@ def test_direct_rm_all_restores_current_and_removes_foreign_registration(
 ):
     home, root = _environment(tmp_path, monkeypatch)
     root.mkdir()
-    saved = root / "saved"
+    saved = root / "files" / HASH / "saved"
+    saved.parent.mkdir(parents=True)
     install = home / ".item"
     saved.write_text("value")
     install.symlink_to(saved)
@@ -50,7 +54,7 @@ def test_direct_rm_all_restores_current_and_removes_foreign_registration(
         str(root),
         {
             "dotfiles": {
-                "saved": {
+                f"files/{HASH}/saved": {
                     "linux": {"path": str(install)},
                     "darwin": {"path": "~/inaccessible"},
                 }
@@ -65,6 +69,55 @@ def test_direct_rm_all_restores_current_and_removes_foreign_registration(
     assert config.load_config(str(root)) == {"dotfiles": {}}
 
 
+def test_raw_backslash_key_install_dry_run_preserves_yaml_key(tmp_path, monkeypatch):
+    home, root = _environment(tmp_path, monkeypatch)
+    root.mkdir()
+    saved = root / "files" / HASH / "saved"
+    saved.parent.mkdir(parents=True)
+    saved.write_text("value")
+    install = home / ".item"
+    raw_yaml_key = f"{HASH}\\saved"
+    (root / "dfm.yaml").write_text(
+        f"dotfiles:\n  {raw_yaml_key}:\n    linux:\n      path: {install}\n"
+    )
+    before = (root / "dfm.yaml").read_bytes()
+
+    _run(monkeypatch, "install", saved, "--dry-run")
+
+    assert not install.exists()
+    assert (root / "dfm.yaml").read_bytes() == before
+    assert f"files/{HASH}/saved" in config.load_config(str(root))["dotfiles"]
+
+
+def test_raw_backslash_key_share_and_rm_keep_raw_mapping(tmp_path, monkeypatch):
+    home, root = _environment(tmp_path, monkeypatch)
+    root.mkdir()
+    saved = root / "files" / HASH / "saved"
+    saved.parent.mkdir(parents=True)
+    saved.write_text("value")
+    install = home / ".item"
+    raw_yaml_key = f"{HASH}\\saved"
+    (root / "dfm.yaml").write_text(
+        f"dotfiles:\n  {raw_yaml_key}:\n    linux:\n      path: {install}\n"
+    )
+
+    _run(
+        monkeypatch,
+        "share",
+        saved,
+        install,
+        "--non-interactive",
+        "--target=darwin=~/.item",
+    )
+    monkeypatch.setattr(cli, "_select_remove_systems", lambda *_: {"darwin"})
+    _run(monkeypatch, "rm", saved, "--force")
+
+    keys = config.load_config(str(root))["dotfiles"]
+    assert keys[f"files/{HASH}/saved"] == {"linux": {"path": str(install)}}
+    assert f"{HASH}/saved:" in (root / "dfm.yaml").read_text()
+    assert f"files/{HASH}/saved" not in (root / "dfm.yaml").read_text()
+
+
 def test_rm_last_foreign_selection_rejects_saved_symlink_parent_before_mutation(
     tmp_path, monkeypatch
 ):
@@ -73,11 +126,13 @@ def test_rm_last_foreign_selection_rejects_saved_symlink_parent_before_mutation(
     namespace = "a" * 32
     external = tmp_path / "external"
     external.mkdir()
-    saved = root / namespace / "saved"
+    saved = root / "files" / namespace / "saved"
     (external / "saved").write_text("value")
-    (root / namespace).symlink_to(external, target_is_directory=True)
+    (root / "files").mkdir()
+    (root / "files" / namespace).symlink_to(external, target_is_directory=True)
     config.save_config(
-        str(root), {"dotfiles": {f"{namespace}/saved": {"darwin": {"path": "~/x"}}}}
+        str(root),
+        {"dotfiles": {f"files/{namespace}/saved": {"darwin": {"path": "~/x"}}}},
     )
     before = (root / "dfm.yaml").read_bytes()
     monkeypatch.setattr(cli, "_select_remove_systems", lambda *_: {"darwin"})
@@ -93,12 +148,13 @@ def test_rm_last_foreign_selection_rejects_saved_symlink_parent_before_mutation(
 def test_rm_noop_selection_preserves_config_bytes(tmp_path, monkeypatch, selection):
     home, root = _environment(tmp_path, monkeypatch)
     root.mkdir()
-    saved = root / "saved"
+    saved = root / "files" / HASH / "saved"
+    saved.parent.mkdir(parents=True)
     saved.write_text("value")
     systems = {"linux": {"path": str(home / ".item")}}
     if selection == {"linux"}:
         systems = {"darwin": {"path": "~/foreign"}}
-    config.save_config(str(root), {"dotfiles": {"saved": systems}})
+    config.save_config(str(root), {"dotfiles": {f"files/{HASH}/saved": systems}})
     before = (root / "dfm.yaml").read_bytes()
     monkeypatch.setattr(cli, "_select_remove_systems", lambda *_: selection)
 
@@ -111,7 +167,8 @@ def test_rm_noop_selection_preserves_config_bytes(tmp_path, monkeypatch, selecti
 def test_rm_foreign_selection_saves_changed_config(tmp_path, monkeypatch):
     home, root = _environment(tmp_path, monkeypatch)
     root.mkdir()
-    saved = root / "saved"
+    saved = root / "files" / HASH / "saved"
+    saved.parent.mkdir(parents=True)
     install = home / ".item"
     saved.write_text("value")
     install.symlink_to(saved)
@@ -119,7 +176,7 @@ def test_rm_foreign_selection_saves_changed_config(tmp_path, monkeypatch):
         str(root),
         {
             "dotfiles": {
-                "saved": {
+                f"files/{HASH}/saved": {
                     "linux": {"path": str(install)},
                     "darwin": {"path": "~/foreign"},
                 }
@@ -132,7 +189,7 @@ def test_rm_foreign_selection_saves_changed_config(tmp_path, monkeypatch):
     _run(monkeypatch, "rm", saved, "--force")
 
     assert (root / "dfm.yaml").read_bytes() != before
-    assert config.load_config(str(root))["dotfiles"]["saved"] == {
+    assert config.load_config(str(root))["dotfiles"][f"files/{HASH}/saved"] == {
         "linux": {"path": str(install)}
     }
 
@@ -140,10 +197,12 @@ def test_rm_foreign_selection_saves_changed_config(tmp_path, monkeypatch):
 def test_rm_last_foreign_selection_deletes_saved_object(tmp_path, monkeypatch):
     _, root = _environment(tmp_path, monkeypatch)
     root.mkdir()
-    saved = root / "saved"
+    saved = root / "files" / HASH / "saved"
+    saved.parent.mkdir(parents=True)
     saved.write_text("value")
     config.save_config(
-        str(root), {"dotfiles": {"saved": {"darwin": {"path": "~/foreign"}}}}
+        str(root),
+        {"dotfiles": {f"files/{HASH}/saved": {"darwin": {"path": "~/foreign"}}}},
     )
     monkeypatch.setattr(cli, "_select_remove_systems", lambda *_: {"darwin"})
 
@@ -162,12 +221,10 @@ def test_direct_share_install_and_noninteractive_target_persistence(
     stale_view = root / "view"
     stale_view.mkdir()
     (stale_view / "stale").write_text("stale")
-    saved = root / os.path.relpath(
-        operations.get_save_path(str(install), False, str(root)), root
-    )
-    saved.parent.mkdir()
+    saved = Path(operations.get_save_path(str(install), False, str(root)))
+    saved.parent.mkdir(parents=True)
     saved.write_text("value")
-    rel = os.path.relpath(saved, root).replace(os.sep, "/")
+    rel = operations.save_path_to_key(str(saved), str(root))
     config.save_config(str(root), {"dotfiles": {rel: {}}})
 
     _run(
@@ -204,13 +261,11 @@ def test_dry_run_and_doctor_missing_root_are_read_only(tmp_path, monkeypatch):
 def test_view_force_and_direct_partial_state_on_config_failure(tmp_path, monkeypatch):
     home, root = _environment(tmp_path, monkeypatch)
     root.mkdir()
-    saved = root / os.path.relpath(
-        operations.get_save_path(str(home / ".shared"), False, str(root)), root
-    )
-    saved.parent.mkdir()
+    saved = Path(operations.get_save_path(str(home / ".shared"), False, str(root)))
+    saved.parent.mkdir(parents=True)
     saved.write_text("value")
     install = home / ".shared"
-    rel = os.path.relpath(saved, root).replace(os.sep, "/")
+    rel = operations.save_path_to_key(str(saved), str(root))
     config.save_config(str(root), {"dotfiles": {rel: {}}})
     _run(monkeypatch, "share", saved, install, "--non-interactive")
     entries = operations.plan_view(config.load_config(str(root)), str(root))
@@ -261,7 +316,7 @@ def test_doctor_reports_broken_configured_entry_without_mutating(
     home, root = _environment(tmp_path, monkeypatch)
     root.mkdir()
     install = home / ".broken"
-    rel = "0" * 32 + "/broken"
+    rel = "files/" + "0" * 32 + "/broken"
     config.save_config(
         str(root), {"dotfiles": {rel: {"linux": {"path": str(install)}}}}
     )
@@ -276,6 +331,124 @@ def test_doctor_reports_broken_configured_entry_without_mutating(
     assert f"missing install link: {install}" in output
     assert (root / "dfm.yaml").read_bytes() == before
     assert not install.exists()
+
+
+def test_doctor_scans_only_unreferenced_objects_in_files_namespace(
+    tmp_path, monkeypatch, capsys
+):
+    home, root = _environment(tmp_path, monkeypatch)
+    namespace = "a" * 32
+    referenced = root / "files" / namespace / "referenced"
+    unreferenced = root / "files" / namespace / "unreferenced"
+    legacy = root / namespace / "legacy"
+    referenced.parent.mkdir(parents=True)
+    referenced.write_text("referenced")
+    unreferenced.write_text("unreferenced")
+    legacy.parent.mkdir()
+    legacy.write_text("legacy")
+    install = home / ".referenced"
+    install.symlink_to(referenced)
+    rel = f"files/{namespace}/referenced"
+    config.save_config(
+        str(root), {"dotfiles": {rel: {"linux": {"path": str(install)}}}}
+    )
+
+    with pytest.raises(SystemExit):
+        _run(monkeypatch, "doctor")
+
+    output = capsys.readouterr().out
+    assert f"unreferenced saved object: files/{namespace}/unreferenced" in output
+    assert f"unreferenced saved object: files/{namespace}/referenced" not in output
+    assert f"unreferenced saved object: files/{namespace}/legacy" not in output
+
+
+def test_doctor_skips_files_root_marked_as_reparse_point(tmp_path, monkeypatch):
+    _, root = _environment(tmp_path, monkeypatch)
+    files_root = root / "files"
+    saved = files_root / ("a" * 32) / "unreferenced"
+    saved.parent.mkdir(parents=True)
+    saved.write_text("value")
+    config.save_config(str(root), {"dotfiles": {}})
+    original = operations._is_link_or_reparse
+    monkeypatch.setattr(
+        operations,
+        "_is_link_or_reparse",
+        lambda path: path == str(files_root) or original(path),
+    )
+
+    _run(monkeypatch, "doctor")
+
+
+def test_doctor_skips_reparse_point_hash_namespace(tmp_path, monkeypatch):
+    _, root = _environment(tmp_path, monkeypatch)
+    namespace = root / "files" / ("a" * 32)
+    saved = namespace / "unreferenced"
+    saved.parent.mkdir(parents=True)
+    saved.write_text("value")
+    config.save_config(str(root), {"dotfiles": {}})
+    original = operations._is_link_or_reparse
+    monkeypatch.setattr(
+        operations,
+        "_is_link_or_reparse",
+        lambda path: path == str(namespace) or original(path),
+    )
+
+    _run(monkeypatch, "doctor")
+
+
+def test_doctor_reports_but_does_not_traverse_reparse_point_descendants(
+    tmp_path, monkeypatch, capsys
+):
+    _, root = _environment(tmp_path, monkeypatch)
+    namespace = root / "files" / ("a" * 32)
+    unreferenced = namespace / "unreferenced"
+    reparse_directory = namespace / "reparse"
+    nested = reparse_directory / "nested"
+    namespace.mkdir(parents=True)
+    unreferenced.write_text("value")
+    reparse_directory.mkdir()
+    nested.write_text("value")
+    config.save_config(str(root), {"dotfiles": {}})
+    original = operations._is_link_or_reparse
+    monkeypatch.setattr(
+        operations,
+        "_is_link_or_reparse",
+        lambda path: path == str(reparse_directory) or original(path),
+    )
+
+    with pytest.raises(SystemExit):
+        _run(monkeypatch, "doctor")
+
+    output = capsys.readouterr().out
+    assert f"unreferenced saved object: files/{namespace.name}/unreferenced" in output
+    assert f"unreferenced saved object: files/{namespace.name}/reparse" in output
+    assert (
+        f"unreferenced saved object: files/{namespace.name}/reparse/nested"
+        not in output
+    )
+
+
+def test_doctor_does_not_report_referenced_reparse_point_descendant(
+    tmp_path, monkeypatch, capsys
+):
+    _, root = _environment(tmp_path, monkeypatch)
+    namespace = root / "files" / ("a" * 32)
+    reparse_directory = namespace / "reparse"
+    nested = reparse_directory / "nested"
+    namespace.mkdir(parents=True)
+    reparse_directory.mkdir()
+    nested.write_text("value")
+    rel = f"files/{namespace.name}/reparse"
+    config.save_config(str(root), {"dotfiles": {rel: {"darwin": {"path": "~/x"}}}})
+    original = operations._is_link_or_reparse
+    monkeypatch.setattr(
+        operations,
+        "_is_link_or_reparse",
+        lambda path: path == str(reparse_directory) or original(path),
+    )
+
+    _run(monkeypatch, "doctor")
+    assert capsys.readouterr().out == "No configuration problems found\n"
 
 
 def test_add_dry_run_rejects_symlink_root_without_writes(tmp_path, monkeypatch):
@@ -307,12 +480,10 @@ def test_install_rejects_destination_race_without_overwriting(tmp_path, monkeypa
     home, root = _environment(tmp_path, monkeypatch)
     root.mkdir()
     install = home / ".race"
-    saved = root / os.path.relpath(
-        operations.get_save_path(str(install), False, str(root)), root
-    )
-    saved.parent.mkdir()
+    saved = Path(operations.get_save_path(str(install), False, str(root)))
+    saved.parent.mkdir(parents=True)
     saved.write_text("saved")
-    rel = os.path.relpath(saved, root).replace(os.sep, "/")
+    rel = operations.save_path_to_key(str(saved), str(root))
     config.save_config(
         str(root), {"dotfiles": {rel: {"linux": {"path": str(install)}}}}
     )
@@ -340,13 +511,15 @@ def test_direct_install_keeps_correct_link_without_prompt_or_output(
 ):
     home, root = _environment(tmp_path, monkeypatch)
     root.mkdir()
-    saved = root / "saved"
+    saved = root / "files" / HASH / "saved"
+    saved.parent.mkdir(parents=True)
     install = home / ".installed"
     saved.write_text("saved")
     target = os.path.relpath(saved, install.parent) if relative else str(saved)
     install.symlink_to(target)
     config.save_config(
-        str(root), {"dotfiles": {"saved": {"linux": {"path": str(install)}}}}
+        str(root),
+        {"dotfiles": {f"files/{HASH}/saved": {"linux": {"path": str(install)}}}},
     )
     monkeypatch.setattr(
         cli,
@@ -364,10 +537,10 @@ def test_view_paths_resolve_for_rm_install_and_share(tmp_path, monkeypatch):
     home, root = _environment(tmp_path, monkeypatch)
     root.mkdir()
     namespace = "a" * 32
-    saved_rm = root / namespace / "saved-rm"
-    saved_install = root / namespace / "saved-install"
-    saved_share = root / namespace / "saved-share"
-    saved_rm.parent.mkdir()
+    saved_rm = root / "files" / namespace / "saved-rm"
+    saved_install = root / "files" / namespace / "saved-install"
+    saved_share = root / "files" / namespace / "saved-share"
+    saved_rm.parent.mkdir(parents=True)
     for saved in (saved_rm, saved_install, saved_share):
         saved.write_text(saved.name)
     install_rm = home / ".rm"
@@ -378,9 +551,13 @@ def test_view_paths_resolve_for_rm_install_and_share(tmp_path, monkeypatch):
         str(root),
         {
             "dotfiles": {
-                f"{namespace}/saved-rm": {"linux": {"path": str(install_rm)}},
-                f"{namespace}/saved-install": {"linux": {"path": str(install_install)}},
-                f"{namespace}/saved-share": {"linux": {"path": str(install_share)}},
+                f"files/{namespace}/saved-rm": {"linux": {"path": str(install_rm)}},
+                f"files/{namespace}/saved-install": {
+                    "linux": {"path": str(install_install)}
+                },
+                f"files/{namespace}/saved-share": {
+                    "linux": {"path": str(install_share)}
+                },
             }
         },
     )
@@ -422,7 +599,9 @@ def test_view_paths_resolve_for_rm_install_and_share(tmp_path, monkeypatch):
     assert (root / "dfm.yaml").read_bytes() == before_dry_run
     _run(monkeypatch, "rm", rm_view, "--all", "--force")
     assert install_rm.read_text() == "saved-rm"
-    assert f"{namespace}/saved-rm" not in config.load_config(str(root))["dotfiles"]
+    assert (
+        f"files/{namespace}/saved-rm" not in config.load_config(str(root))["dotfiles"]
+    )
 
 
 def test_unmanaged_view_path_remains_rejected(tmp_path, monkeypatch):

@@ -123,7 +123,55 @@ def get_save_path(install_path, system, dotfiles_root):
         filename = os.path.basename(install_path)
     save_dir = hashlib.md5(hash_path.encode("utf8")).hexdigest()
     system_sep = os_name() if system else ""
-    return os.path.join(dotfiles_root, save_dir, system_sep, filename)
+    return os.path.join(dotfiles_root, "files", save_dir, system_sep, filename)
+
+
+def save_path_to_key(abs_save_path, dotfiles_root):
+    """Convert a physical saved-object path to its dfm.yaml key."""
+    return os.path.relpath(abs_save_path, dotfiles_root).replace(os.sep, posixpath.sep)
+
+
+def canonical_save_key(save_key):
+    """Return the canonical slash form of one saved-object key, or ``None``."""
+    if (
+        not isinstance(save_key, str)
+        or not save_key
+        or not save_key.startswith("files/")
+        or "\\" in save_key
+    ):
+        return None
+    parts = save_key.split("/")
+    if (
+        len(parts) not in (3, 4)
+        or len(parts[1]) != 32
+        or any(character not in "0123456789abcdef" for character in parts[1])
+        or (len(parts) == 4 and parts[2] not in SUPPORTED_SYSTEMS)
+        or any(part in ("", ".", "..") for part in parts)
+    ):
+        return None
+    return save_key
+
+
+def key_to_save_path(save_key, dotfiles_root):
+    """Convert a dfm.yaml key to its physical saved-object path."""
+    canonical = canonical_save_key(save_key)
+    if canonical is None:
+        raise ValueError("invalid saved path in dfm.yaml")
+    return os.path.abspath(os.path.join(dotfiles_root, *canonical.split("/")))
+
+
+def _is_save_key(save_key):
+    """Return whether a YAML key names one canonical saved object."""
+    return canonical_save_key(save_key) is not None
+
+
+def raw_save_key(config, save_key):
+    """Find the unique raw YAML key for a canonical or raw saved-object key."""
+    return (
+        save_key
+        if canonical_save_key(save_key) and save_key in config.get("dotfiles", {})
+        else None
+    )
 
 
 def _is_within(path, directory):
@@ -201,7 +249,14 @@ def validate_add(install_path, system, dotfiles_root):
         return f"{install_path} cannot be in dotfiles"
     if not _is_within(install_path, os.path.expanduser("~")):
         return f"{install_path} must be in home"
-    if os.path.exists(get_save_path(install_path, system, dotfiles_root)):
+    if "\\" in os.path.basename(install_path):
+        return f"{install_path} has an invalid saved filename"
+    if system and os_name() not in SUPPORTED_SYSTEMS:
+        return f"{os_name()} is not a supported system"
+    save_path = get_save_path(install_path, system, dotfiles_root)
+    if canonical_save_key(save_path_to_key(save_path, dotfiles_root)) is None:
+        return f"{install_path} has an invalid saved path"
+    if os.path.exists(save_path):
         return f"{install_path} has been kept in dotfiles"
     return None
 
@@ -217,8 +272,10 @@ def _remove_save_path(path, dotfiles_root):
 
 def validate_remove(path, dotfiles_root, resolved_save_path=None):
     target_path = resolved_save_path or _remove_save_path(path, dotfiles_root)
-    if not _is_within(target_path, dotfiles_root):
+    if not _is_within(target_path, os.path.join(dotfiles_root, "files")):
         return f"{path} is not in dotfiles"
+    if not _is_save_key(save_path_to_key(target_path, dotfiles_root)):
+        return f"{path} is not a canonical saved path"
     return None
 
 
@@ -228,18 +285,27 @@ def validate_config(config, dotfiles_root):
     if not isinstance(config, dict) or not isinstance(config.get("dotfiles"), dict):
         return ["dfm.yaml must contain a dotfiles mapping"]
     for rel_path, systems in config["dotfiles"].items():
-        if not isinstance(rel_path, str) or not rel_path or os.path.isabs(rel_path):
+        if not _is_save_key(rel_path):
             errors.append("invalid saved path in dfm.yaml")
+            continue
+        if (
+            sum(
+                canonical_save_key(other) == canonical_save_key(rel_path)
+                for other in config["dotfiles"]
+            )
+            > 1
+        ):
+            errors.append("ambiguous saved paths in dfm.yaml")
             continue
         if _is_view_key(rel_path):
             errors.append("view is reserved and cannot be a saved path")
             continue
-        saved = os.path.abspath(
-            os.path.join(dotfiles_root, rel_path.replace("/", os.sep))
-        )
-        if _same_path(saved, dotfiles_root):
+        saved = key_to_save_path(rel_path, dotfiles_root)
+        if _same_path(saved, dotfiles_root) or _same_path(
+            saved, os.path.join(dotfiles_root, "files")
+        ):
             errors.append("saved path cannot be dotfiles root")
-        elif not _is_within(saved, dotfiles_root):
+        elif not _is_within(saved, os.path.join(dotfiles_root, "files")):
             errors.append("saved path escapes dotfiles root")
         elif _is_view_filesystem_path(
             os.path.relpath(saved, dotfiles_root)
@@ -271,8 +337,11 @@ def validate_config(config, dotfiles_root):
 
 
 def validate_save_path(path, dotfiles_root):
-    if path is None or not _is_within(path, dotfiles_root):
+    if path is None or not _is_within(path, os.path.join(dotfiles_root, "files")):
         return f"{path} is not in dotfiles"
+    relative = save_path_to_key(path, dotfiles_root)
+    if not _is_save_key(relative):
+        return f"{path} is not a canonical saved path"
     relative = os.path.relpath(path, dotfiles_root)
     if _is_view_filesystem_path(relative) or _is_within(
         os.path.realpath(path),
@@ -425,7 +494,7 @@ def plan_view(config, dotfiles_root):
     logical_paths = []
     projected_paths = []
     for rel_save_path, systems in config["dotfiles"].items():
-        saved = os.path.abspath(os.path.join(root, rel_save_path.replace("/", os.sep)))
+        saved = key_to_save_path(rel_save_path, root)
         error = validate_saved_object(saved, root)
         if error:
             raise ValueError(error)
@@ -531,10 +600,12 @@ def resolve_view_save_path(path, dotfiles_root):
         target = os.path.abspath(os.path.normpath(target))
         if not _is_within(target, root):
             return path
-        namespace = os.path.relpath(target, root).split(os.sep)[0]
+        parts = os.path.relpath(target, root).split(os.sep)
         if (
-            len(namespace) != 32
-            or any(character not in "0123456789abcdef" for character in namespace)
+            len(parts) < 3
+            or parts[0] != "files"
+            or len(parts[1]) != 32
+            or any(character not in "0123456789abcdef" for character in parts[1])
             or not (os.path.isfile(target) or os.path.isdir(target))
         ):
             return path
@@ -669,16 +740,18 @@ def validate_foreign_target(system, path):
 
 
 def is_platform_specific_save_path(rel_save_path):
-    """Recognize only the canonical <md5>/<platform>/<basename> namespace."""
-    if not isinstance(rel_save_path, str):
+    """Recognize only the canonical <md5>/<platform>/<basename> key."""
+    rel_save_path = canonical_save_key(rel_save_path)
+    if rel_save_path is None:
         return False
     parts = rel_save_path.split("/")
     return (
-        len(parts) == 3
-        and len(parts[0]) == 32
-        and all(character in "0123456789abcdef" for character in parts[0])
-        and parts[1] in SUPPORTED_SYSTEMS
-        and bool(parts[2])
+        len(parts) == 4
+        and parts[0] == "files"
+        and len(parts[1]) == 32
+        and all(character in "0123456789abcdef" for character in parts[1])
+        and parts[2] in SUPPORTED_SYSTEMS
+        and bool(parts[3])
     )
 
 
@@ -687,7 +760,10 @@ def merge_targets(config, rel_save_path, targets):
     if is_platform_specific_save_path(rel_save_path) and targets:
         raise ValueError("platform-specific saved objects cannot have external targets")
     merged = copy.deepcopy(config)
-    systems = merged["dotfiles"].setdefault(rel_save_path, {})
+    raw_key = raw_save_key(merged, rel_save_path)
+    if raw_key is None:
+        raw_key = canonical_save_key(rel_save_path)
+    systems = merged["dotfiles"].setdefault(raw_key, {})
     for system, path in targets.items():
         error = validate_foreign_target(system, path)
         if error:
@@ -875,13 +951,13 @@ def validate_install_sources(config, dotfiles_root, abs_save_path=None):
     """Ensure every current-platform object to install exists before prompts."""
     selected = None
     if abs_save_path is not None:
-        selected = os.path.relpath(abs_save_path, dotfiles_root).replace(os.sep, "/")
+        selected = save_path_to_key(abs_save_path, dotfiles_root)
     for rel_path in config["dotfiles"]:
-        if selected is not None and rel_path != selected:
+        if selected is not None and canonical_save_key(rel_path) != selected:
             continue
         if get_path(config, rel_path) is None:
             continue
-        saved = os.path.join(dotfiles_root, rel_path.replace("/", os.sep))
+        saved = key_to_save_path(rel_path, dotfiles_root)
         error = validate_saved_object(saved, dotfiles_root)
         if error:
             return error
@@ -907,7 +983,7 @@ def validate_remove_destination(config, rel_save_path, dotfiles_root=None, force
         target = os.readlink(install)
         if not os.path.isabs(target):
             target = os.path.join(os.path.dirname(install), target)
-        expected = os.path.join(dotfiles_root, rel_save_path.replace("/", os.sep))
+        expected = key_to_save_path(rel_save_path, dotfiles_root)
         if os.path.abspath(os.path.normpath(target)) != os.path.abspath(
             os.path.normpath(expected)
         ):
@@ -917,14 +993,18 @@ def validate_remove_destination(config, rel_save_path, dotfiles_root=None, force
 
 def set_path(config, rel_save_path, install_path):
     current_os = os_name()
-    config["dotfiles"].setdefault(rel_save_path, {}).setdefault(current_os, {})[
-        "path"
-    ] = shrinkuser(install_path)
+    raw_key = raw_save_key(config, rel_save_path)
+    if raw_key is None:
+        raw_key = canonical_save_key(rel_save_path)
+    config["dotfiles"].setdefault(raw_key, {}).setdefault(current_os, {})["path"] = (
+        shrinkuser(install_path)
+    )
     return config
 
 
 def get_path(config, rel_save_path):
-    item = config["dotfiles"].get(rel_save_path, {}).get(os_name())
+    raw_key = raw_save_key(config, rel_save_path)
+    item = config["dotfiles"].get(raw_key, {}).get(os_name()) if raw_key else None
     return expanduser(item["path"]) if item is not None else None
 
 
@@ -943,15 +1023,16 @@ def _make_link(target, link, confirm_replace):
 
 
 def add(install_path, system, config, dotfiles_root, targets=None):
+    error = validate_add(install_path, system, dotfiles_root)
+    if error:
+        raise ValueError(error)
     abs_save_path = get_save_path(install_path, system, dotfiles_root)
     os.makedirs(os.path.dirname(abs_save_path), exist_ok=True)
     shutil.move(install_path, abs_save_path)
     windows.create_symlink(
         abs_save_path, install_path, target_is_directory=os.path.isdir(abs_save_path)
     )
-    rel_save_path = os.path.relpath(abs_save_path, dotfiles_root).replace(
-        os.sep, posixpath.sep
-    )
+    rel_save_path = save_path_to_key(abs_save_path, dotfiles_root)
     updated = set_path(copy.deepcopy(config), rel_save_path, install_path)
     updated = merge_targets(updated, rel_save_path, targets or {})
     return OperationResult(
@@ -971,20 +1052,19 @@ def remove(
 ):
     """Remove selected registrations, optionally using a pre-resolved saved path."""
     abs_save_path = resolved_save_path or _remove_save_path(path, dotfiles_root)
-    rel_save_path = os.path.relpath(abs_save_path, dotfiles_root).replace(
-        os.sep, posixpath.sep
-    )
+    rel_save_path = save_path_to_key(abs_save_path, dotfiles_root)
+    raw_key = raw_save_key(config, rel_save_path)
     if all_platforms:
         # Preserve the historical --all behavior, including its special case
         # for entries without a current-platform registration.
         install_path = get_path(config, rel_save_path)
         if install_path is None:
-            if rel_save_path in config["dotfiles"]:
+            if raw_key is not None:
                 if os.path.islink(abs_save_path) or os.path.isfile(abs_save_path):
                     os.unlink(abs_save_path)
                 else:
                     shutil.rmtree(abs_save_path)
-                del config["dotfiles"][rel_save_path]
+                del config["dotfiles"][raw_key]
                 return OperationResult(config, [f"Remove {rel_save_path}"])
             return OperationResult(config)
 
@@ -1001,12 +1081,12 @@ def remove(
                 os.unlink(install_path)
             else:
                 shutil.rmtree(install_path)
-        del config["dotfiles"][rel_save_path][os_name()]
+        del config["dotfiles"][raw_key][os_name()]
         shutil.move(abs_save_path, install_path)
-        del config["dotfiles"][rel_save_path]
+        del config["dotfiles"][raw_key]
         return OperationResult(config, [f"Remove {rel_save_path}"])
 
-    systems = config["dotfiles"].get(rel_save_path)
+    systems = config["dotfiles"].get(raw_key)
     if systems is None:
         return OperationResult(config)
     current = os_name()
@@ -1022,7 +1102,7 @@ def remove(
                 os.unlink(abs_save_path)
             else:
                 shutil.rmtree(abs_save_path)
-            del config["dotfiles"][rel_save_path]
+            del config["dotfiles"][raw_key]
         return OperationResult(config, [f"Remove {rel_save_path}"])
 
     install_path = get_path(config, rel_save_path)
@@ -1048,16 +1128,14 @@ def remove(
             shutil.copytree(abs_save_path, install_path)
     else:
         shutil.move(abs_save_path, install_path)
-        del config["dotfiles"][rel_save_path]
+        del config["dotfiles"][raw_key]
     return OperationResult(config, [f"Remove {rel_save_path}"])
 
 
 def install(abs_save_path, config, dotfiles_root, confirm_replace, accepted=None):
     rel_save_path = None
     if abs_save_path is not None:
-        rel_save_path = os.path.relpath(abs_save_path, dotfiles_root).replace(
-            os.sep, posixpath.sep
-        )
+        rel_save_path = save_path_to_key(abs_save_path, dotfiles_root)
         if get_path(config, rel_save_path) is None:
             return OperationResult(config, [f"{rel_save_path} is not kept in dotfiles"])
     error = validate_install_sources(config, dotfiles_root, abs_save_path)
@@ -1068,14 +1146,15 @@ def install(abs_save_path, config, dotfiles_root, confirm_replace, accepted=None
     # partially-installed batch when a later replacement is declined.
     candidates = []
     for item_rel_save_path in config["dotfiles"]:
-        if rel_save_path is not None and item_rel_save_path != rel_save_path:
+        if (
+            rel_save_path is not None
+            and canonical_save_key(item_rel_save_path) != rel_save_path
+        ):
             continue
         item_install_path = get_path(config, item_rel_save_path)
         if item_install_path is None:
             continue
-        item_abs_save_path = os.path.join(dotfiles_root, item_rel_save_path).replace(
-            posixpath.sep, os.sep
-        )
+        item_abs_save_path = key_to_save_path(item_rel_save_path, dotfiles_root)
         candidates.append((item_rel_save_path, item_abs_save_path, item_install_path))
     approved = []
     for item_rel_save_path, item_abs_save_path, item_install_path in candidates:
@@ -1126,10 +1205,11 @@ def _current_paths_equal(first, second):
 
 def validate_share_state(abs_save_path, install_path, config, dotfiles_root):
     """Return an error for an immutable current mapping before mutation."""
-    rel_save_path = os.path.relpath(abs_save_path, dotfiles_root).replace(
-        os.sep, posixpath.sep
+    rel_save_path = save_path_to_key(abs_save_path, dotfiles_root)
+    raw_key = raw_save_key(config, rel_save_path)
+    current = (
+        config.get("dotfiles", {}).get(raw_key, {}).get(os_name()) if raw_key else None
     )
-    current = config.get("dotfiles", {}).get(rel_save_path, {}).get(os_name())
     if current is not None and not _current_paths_equal(current["path"], install_path):
         return "current platform already has a different path; use dfm rm first"
     if (
@@ -1149,10 +1229,9 @@ def share(
     targets=None,
     expected_state=None,
 ):
-    rel_save_path = os.path.relpath(abs_save_path, dotfiles_root).replace(
-        os.sep, posixpath.sep
-    )
-    if rel_save_path not in config["dotfiles"]:
+    rel_save_path = save_path_to_key(abs_save_path, dotfiles_root)
+    raw_key = raw_save_key(config, rel_save_path)
+    if raw_key is None:
         return OperationResult(config, [f"{rel_save_path} is not kept in dotfiles"])
     error = validate_saved_object(abs_save_path, dotfiles_root)
     if error:
@@ -1165,7 +1244,7 @@ def share(
     )
     if state_error:
         raise ValueError(state_error)
-    current = config["dotfiles"][rel_save_path].get(os_name())
+    current = config["dotfiles"][raw_key].get(os_name())
     updated = merge_targets(config, rel_save_path, targets or {})
     state = _link_state(abs_save_path, install_path)
     if expected_state is not None and state != expected_state:

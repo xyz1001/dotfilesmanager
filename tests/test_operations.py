@@ -8,6 +8,29 @@ import pytest
 
 from dotfilesmanager import config, operations
 
+HASH = "d41d8cd98f00b204e9800998ecf8427e"
+ONE_KEY = "files/" + HASH + "/one"
+TWO_KEY = "files/" + HASH + "/two"
+OBJECT_KEY = "files/" + HASH + "/item"
+FOREIGN_KEY = "files/" + HASH + "/foreign"
+WINDOWS_KEY = "files/" + HASH + "/windows"
+
+
+def test_add_system_rejects_unsupported_platform_before_mutation(tmp_path, monkeypatch):
+    home = tmp_path / "home"
+    root = home / "dotfiles"
+    home.mkdir()
+    source = home / "item"
+    source.write_text("original")
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setattr(operations, "os_name", lambda: "freebsd")
+
+    with pytest.raises(ValueError, match="not a supported system"):
+        operations.add(str(source), True, {"dotfiles": {}}, str(root))
+
+    assert source.read_text() == "original"
+    assert not root.exists()
+
 
 def test_mutation_validation_rejects_windows_reparse_root(tmp_path, monkeypatch):
     root = tmp_path / "root"
@@ -32,7 +55,7 @@ def test_config_rejects_saved_key_normalizing_to_root_on_windows(
 ):
     monkeypatch.setattr(operations, "os_name", lambda: "windows")
     config = {"dotfiles": {key: {}}}
-    assert "saved path cannot be dotfiles root" in operations.validate_config(
+    assert "invalid saved path in dfm.yaml" in operations.validate_config(
         config, str(tmp_path / "DotFiles")
     )
 
@@ -115,35 +138,36 @@ def test_android_targets_use_posix_validation_and_same_path_candidate(monkeypatc
     assert operations.target_candidates("~/.config/app", "android") == [
         ("~/.config/app", "~/.config/app")
     ]
-    rel = "a" * 32 + "/android/item"
+    rel = f"files/{HASH}/android/item"
     assert operations.is_platform_specific_save_path(rel)
+    assert not operations.is_platform_specific_save_path(f"{HASH}/android/item")
 
 
 def test_android_current_namespace_never_falls_back_to_linux(tmp_path, monkeypatch):
     home = tmp_path / "home"
     root = home / "dotfiles"
-    saved = root / "saved"
+    saved = root / "files" / HASH / "saved"
     home.mkdir()
-    root.mkdir()
+    saved.parent.mkdir(parents=True)
     saved.write_text("value")
     monkeypatch.setenv("HOME", str(home))
     monkeypatch.setattr(operations, "os_name", lambda: "android")
     config = {
         "dotfiles": {
-            "saved": {
+            f"files/{HASH}/saved": {
                 "linux": {"path": "~/linux"},
                 "android": {"path": "~/android"},
             }
         }
     }
-    assert operations.get_path(config, "saved") == str(home / "android")
-    linux_only = {"dotfiles": {"saved": {"linux": {"path": "~/linux"}}}}
-    assert operations.get_path(linux_only, "saved") is None
+    assert operations.get_path(config, f"files/{HASH}/saved") == str(home / "android")
+    linux_only = {"dotfiles": {f"files/{HASH}/saved": {"linux": {"path": "~/linux"}}}}
+    assert operations.get_path(linux_only, f"files/{HASH}/saved") is None
     system_save = operations.get_save_path(str(home / "item"), True, str(root))
-    assert os.path.relpath(system_save, root).split(os.sep)[1] == "android"
+    assert os.path.relpath(system_save, root).split(os.sep)[2] == "android"
     installed = operations.install(str(saved), config, str(root), lambda _: True)
     assert (home / "android").is_symlink()
-    assert installed.messages == [f"Install saved -> {home / 'android'}"]
+    assert installed.messages == [f"Install files/{HASH}/saved -> {home / 'android'}"]
     entries = operations.plan_view(config, str(root))
     assert len(entries) == 2
     assert any("android" in entry.path for entry in entries)
@@ -158,10 +182,10 @@ def test_get_save_path_hashes_shrunk_parent_and_optional_system(tmp_path, monkey
     digest = hashlib.md5(b"~/.config").hexdigest()
     assert operations.get_save_path(
         str(install_path), False, str(tmp_path / "repo")
-    ) == str(tmp_path / "repo" / digest / "app")
+    ) == str(tmp_path / "repo" / "files" / digest / "app")
     assert operations.get_save_path(
         str(install_path), True, str(tmp_path / "repo")
-    ) == str(tmp_path / "repo" / digest / "linux" / "app")
+    ) == str(tmp_path / "repo" / "files" / digest / "linux" / "app")
 
 
 def test_get_save_path_canonicalizes_windows_home_relative_parent(
@@ -188,7 +212,7 @@ def test_get_save_path_canonicalizes_windows_home_relative_parent(
     digest = hashlib.md5(rb"~\.config\opencode").hexdigest()
     assert os.path.dirname(tui_save_path) == os.path.dirname(config_save_path)
     assert os.path.dirname(tui_save_path) == os.path.dirname(tilde_save_path)
-    assert os.path.dirname(tui_save_path) == str(tmp_path / "repo" / digest)
+    assert os.path.dirname(tui_save_path) == str(tmp_path / "repo" / "files" / digest)
 
 
 def test_validate_add_rejects_outside_repository_and_duplicate(tmp_path, monkeypatch):
@@ -250,6 +274,21 @@ def test_validate_add_uses_lexical_path_for_symbolic_links(tmp_path, monkeypatch
     )
 
 
+def test_add_rejects_backslash_filename_before_mutation(tmp_path, monkeypatch):
+    home = tmp_path / "home"
+    repo = home / "dotfiles"
+    install = home / "literal\\backslash"
+    home.mkdir()
+    install.write_text("value")
+    monkeypatch.setenv("HOME", str(home))
+
+    with pytest.raises(ValueError, match="invalid saved filename"):
+        operations.add(str(install), False, {"dotfiles": {}}, str(repo))
+
+    assert install.read_text() == "value"
+    assert not repo.exists()
+
+
 def test_add_moves_file_creates_absolute_link_and_records_posix_path(
     tmp_path, monkeypatch
 ):
@@ -265,7 +304,7 @@ def test_add_moves_file_creates_absolute_link_and_records_posix_path(
     result = operations.add(str(install_path), True, config, str(repo))
 
     saved = operations.get_save_path(str(install_path), True, str(repo))
-    rel_saved = os.path.relpath(saved, repo).replace(os.sep, "/")
+    rel_saved = operations.save_path_to_key(saved, str(repo))
     assert open(saved).read() == "settings"
     assert install_path.is_symlink()
     assert os.readlink(install_path) == saved
@@ -273,10 +312,23 @@ def test_add_moves_file_creates_absolute_link_and_records_posix_path(
     assert result.messages == [f"Add {install_path} to {rel_saved}"]
 
 
+def test_save_config_omits_internal_files_namespace(tmp_path):
+    repo = tmp_path / "repo"
+    data = {"dotfiles": {f"files/{HASH}/saved": {"linux": {"path": "~/saved"}}}}
+
+    config.save_config(str(repo), data)
+
+    saved_yaml = (repo / "dfm.yaml").read_text()
+    assert f"{HASH}/saved:" in saved_yaml
+    assert "files/" not in saved_yaml
+    assert config.load_config(str(repo)) == data
+
+
 def test_validate_remove_accepts_repository_link_and_rejects_outside(tmp_path):
     repo = tmp_path / "repo"
     repo.mkdir()
-    saved = repo / "saved"
+    saved = repo / "files" / HASH / "saved"
+    saved.parent.mkdir(parents=True)
     saved.write_text("data")
     link = tmp_path / "link"
     link.symlink_to(saved)
@@ -295,32 +347,45 @@ def test_validate_remove_accepts_repo_link_and_relative_install_link(tmp_path):
     repo.mkdir()
     outside = tmp_path / "outside"
     outside.write_text("outside")
-    saved_link = repo / "saved-link"
+    saved_link = repo / "files" / HASH / "saved-link"
+    saved_link.parent.mkdir(parents=True)
     saved_link.symlink_to(outside)
     install_dir = tmp_path / "home" / "config"
     install_dir.mkdir(parents=True)
     install_link = install_dir / "item"
-    install_link.symlink_to("../../repo/saved-link")
+    install_link.symlink_to(f"../../repo/files/{HASH}/saved-link")
 
     assert operations.validate_remove(str(saved_link), str(repo)) is None
     assert operations.validate_remove(str(install_link), str(repo)) is None
 
 
+def test_validate_remove_rejects_non_hash_saved_namespace(tmp_path):
+    repo = tmp_path / "repo"
+    saved = repo / "files" / "not-a-hash" / "item"
+    saved.parent.mkdir(parents=True)
+    saved.write_text("value")
+
+    assert "canonical saved path" in operations.validate_remove(str(saved), str(repo))
+
+
 def test_remove_resolves_relative_install_link_target(tmp_path, monkeypatch):
     repo = tmp_path / "repo"
     repo.mkdir()
-    saved = repo / "saved"
+    saved = repo / "files" / HASH / "saved"
+    saved.parent.mkdir(parents=True)
     saved.write_text("saved")
     install_dir = tmp_path / "home" / "config"
     install_dir.mkdir(parents=True)
     install_link = install_dir / "item"
-    install_link.symlink_to("../../repo/saved")
-    config = {"dotfiles": {"saved": {"linux": {"path": str(install_link)}}}}
+    install_link.symlink_to(f"../../repo/files/{HASH}/saved")
+    config = {
+        "dotfiles": {f"files/{HASH}/saved": {"linux": {"path": str(install_link)}}}
+    }
     monkeypatch.setattr(operations, "os_name", lambda: "linux")
 
     result = operations.remove(str(install_link), config, str(repo))
 
-    assert result.messages == ["Remove saved"]
+    assert result.messages == [f"Remove files/{HASH}/saved"]
     assert result.config == {"dotfiles": {}}
     assert install_link.read_text() == "saved"
     assert not install_link.is_symlink()
@@ -334,17 +399,20 @@ def test_remove_uses_repo_symbolic_link_path_without_following_target(
     repo.mkdir()
     outside = tmp_path / "outside"
     outside.write_text("outside")
-    saved_link = repo / "saved-link"
+    saved_link = repo / "files" / HASH / "saved-link"
+    saved_link.parent.mkdir(parents=True)
     saved_link.symlink_to(outside)
     install_path = tmp_path / "home" / "item"
     install_path.parent.mkdir()
     install_path.symlink_to(saved_link)
-    config = {"dotfiles": {"saved-link": {"linux": {"path": str(install_path)}}}}
+    config = {
+        "dotfiles": {f"files/{HASH}/saved-link": {"linux": {"path": str(install_path)}}}
+    }
     monkeypatch.setattr(operations, "os_name", lambda: "linux")
 
     result = operations.remove(str(saved_link), config, str(repo))
 
-    assert result.messages == ["Remove saved-link"]
+    assert result.messages == [f"Remove files/{HASH}/saved-link"]
     assert result.config == {"dotfiles": {}}
     assert not os.path.lexists(saved_link)
     assert install_path.is_symlink()
@@ -367,25 +435,26 @@ def test_install_skips_other_systems_and_reports_unknown_item(tmp_path, monkeypa
     repo.mkdir()
     linux_install = tmp_path / "home" / ".linuxrc"
     darwin_install = tmp_path / "home" / ".darwinrc"
-    (repo / "one").write_text("linux")
-    (repo / "two").write_text("darwin")
+    (repo / "files" / HASH).mkdir(parents=True)
+    (repo / "files" / HASH / "one").write_text("linux")
+    (repo / "files" / HASH / "two").write_text("darwin")
     config = {
         "dotfiles": {
-            "one": {"linux": {"path": str(linux_install)}},
-            "two": {"darwin": {"path": str(darwin_install)}},
+            ONE_KEY: {"linux": {"path": str(linux_install)}},
+            TWO_KEY: {"darwin": {"path": str(darwin_install)}},
         }
     }
     monkeypatch.setattr(operations, "os_name", lambda: "linux")
 
     result = operations.install(None, config, str(repo), lambda _: True)
     unknown = operations.install(
-        str(repo / "missing"), config, str(repo), lambda _: True
+        str(repo / "files" / "missing"), config, str(repo), lambda _: True
     )
 
     assert linux_install.is_symlink()
     assert not darwin_install.exists()
-    assert result.messages == [f"Install one -> {linux_install}"]
-    assert unknown.messages == ["missing is not kept in dotfiles"]
+    assert result.messages == [f"Install {ONE_KEY} -> {linux_install}"]
+    assert unknown.messages == ["files/missing is not kept in dotfiles"]
 
 
 @pytest.mark.parametrize("existing", ["file", "directory", "dangling-link"])
@@ -394,7 +463,8 @@ def test_install_replaces_file_directory_or_dangling_link_only_when_confirmed(
 ):
     repo = tmp_path / "repo"
     repo.mkdir()
-    saved = repo / "saved"
+    saved = repo / "files" / HASH / "saved"
+    saved.parent.mkdir(parents=True)
     saved.write_text("saved")
     install_path = tmp_path / "home" / "target"
     install_path.parent.mkdir()
@@ -405,7 +475,7 @@ def test_install_replaces_file_directory_or_dangling_link_only_when_confirmed(
         (install_path / "child").write_text("existing")
     else:
         install_path.symlink_to(tmp_path / "missing")
-    config = _config("saved", install_path)
+    config = _config(f"files/{HASH}/saved", install_path)
     monkeypatch.setattr(operations, "os_name", lambda: "linux")
 
     rejected = operations.install(str(saved), config, str(repo), lambda _: False)
@@ -424,7 +494,7 @@ def test_install_replaces_file_directory_or_dangling_link_only_when_confirmed(
     installed = operations.install(str(saved), config, str(repo), lambda _: True)
     assert install_path.is_symlink()
     assert os.readlink(install_path) == str(saved)
-    assert installed.messages == [f"Install saved -> {install_path}"]
+    assert installed.messages == [f"Install files/{HASH}/saved -> {install_path}"]
 
 
 @pytest.mark.parametrize("relative", [False, True])
@@ -433,9 +503,9 @@ def test_install_keeps_correct_absolute_or_relative_link_without_confirmation(
 ):
     repo = tmp_path / "repo"
     home = tmp_path / "home"
-    repo.mkdir()
     home.mkdir()
-    saved = repo / "saved"
+    saved = repo / "files" / HASH / "saved"
+    saved.parent.mkdir(parents=True)
     install_path = home / "target"
     saved.write_text("saved")
     target = os.path.relpath(saved, install_path.parent) if relative else str(saved)
@@ -444,7 +514,7 @@ def test_install_keeps_correct_absolute_or_relative_link_without_confirmation(
 
     result = operations.install(
         str(saved),
-        _config("saved", install_path),
+        _config(f"files/{HASH}/saved", install_path),
         str(repo),
         lambda _: pytest.fail("correct link must not request confirmation"),
     )
@@ -456,26 +526,31 @@ def test_install_keeps_correct_absolute_or_relative_link_without_confirmation(
 def test_share_handles_known_unknown_and_rejected_replacement(tmp_path, monkeypatch):
     repo = tmp_path / "repo"
     repo.mkdir()
-    saved = repo / "saved"
+    saved = repo / "files" / HASH / "saved"
+    saved.parent.mkdir(parents=True)
     saved.write_text("saved")
     install_path = tmp_path / "home" / "target"
     install_path.parent.mkdir()
     install_path.write_text("existing")
-    config = {"dotfiles": {"saved": {"darwin": {"path": "~/old"}}}}
+    config = {"dotfiles": {f"files/{HASH}/saved": {"darwin": {"path": "~/old"}}}}
     monkeypatch.setenv("HOME", str(tmp_path / "home"))
     monkeypatch.setattr(operations, "os_name", lambda: "linux")
 
     unknown = operations.share(
-        str(repo / "unknown"), str(install_path), config, str(repo), lambda _: True
+        str(repo / "files" / "unknown"),
+        str(install_path),
+        config,
+        str(repo),
+        lambda _: True,
     )
     rejected = operations.share(
         str(saved), str(install_path), config, str(repo), lambda _: False
     )
 
-    assert unknown.messages == ["unknown is not kept in dotfiles"]
+    assert unknown.messages == ["files/unknown is not kept in dotfiles"]
     assert rejected.messages == []
     assert install_path.read_text() == "existing"
-    assert "linux" not in rejected.config["dotfiles"]["saved"]
+    assert "linux" not in rejected.config["dotfiles"][f"files/{HASH}/saved"]
 
 
 def test_share_links_known_item_creates_parent_and_preserves_other_system(
@@ -483,10 +558,11 @@ def test_share_links_known_item_creates_parent_and_preserves_other_system(
 ):
     repo = tmp_path / "repo"
     repo.mkdir()
-    saved = repo / "saved"
+    saved = repo / "files" / HASH / "saved"
+    saved.parent.mkdir(parents=True)
     saved.write_text("saved")
     install_path = tmp_path / "home" / "nested" / "target"
-    config = {"dotfiles": {"saved": {"darwin": {"path": "~/old"}}}}
+    config = {"dotfiles": {f"files/{HASH}/saved": {"darwin": {"path": "~/old"}}}}
     monkeypatch.setenv("HOME", str(tmp_path / "home"))
     monkeypatch.setattr(operations, "os_name", lambda: "linux")
 
@@ -496,33 +572,33 @@ def test_share_links_known_item_creates_parent_and_preserves_other_system(
 
     assert install_path.is_symlink()
     assert os.readlink(install_path) == str(saved)
-    assert result.config["dotfiles"]["saved"] == {
+    assert result.config["dotfiles"][f"files/{HASH}/saved"] == {
         "darwin": {"path": "~/old"},
         "linux": {"path": "~/nested/target"},
     }
-    assert result.messages == [f"share saved -> {install_path}"]
+    assert result.messages == [f"share files/{HASH}/saved -> {install_path}"]
 
 
 def test_share_matching_current_mapping_link_state_matrix(tmp_path, monkeypatch):
     repo = tmp_path / "repo"
     home = tmp_path / "home"
-    saved = repo / "saved"
+    saved = repo / "files" / HASH / "saved"
+    saved.parent.mkdir(parents=True)
     target = home / "target"
-    repo.mkdir()
     home.mkdir()
     saved.write_text("saved")
     monkeypatch.setenv("HOME", str(home))
     monkeypatch.setattr(operations, "os_name", lambda: "linux")
-    config = {"dotfiles": {"saved": {"linux": {"path": "~/target"}}}}
+    config = {"dotfiles": {f"files/{HASH}/saved": {"linux": {"path": "~/target"}}}}
 
     # A correct current mapping and link is a genuine no-op, including relative links.
-    target.symlink_to("../repo/saved")
+    target.symlink_to(f"../repo/files/{HASH}/saved")
     correct = operations.share(
         str(saved), str(target), config, str(repo), lambda _: True
     )
     assert correct.config == config
     assert correct.messages == []
-    assert os.readlink(target) == "../repo/saved"
+    assert os.readlink(target) == f"../repo/files/{HASH}/saved"
 
     # Missing links are rebuilt without changing the matching mapping.
     target.unlink()
@@ -531,7 +607,7 @@ def test_share_matching_current_mapping_link_state_matrix(tmp_path, monkeypatch)
     )
     assert target.is_symlink()
     assert rebuilt.config == config
-    assert rebuilt.messages == [f"share saved -> {target}"]
+    assert rebuilt.messages == [f"share files/{HASH}/saved -> {target}"]
 
     # A conflicting object is left alone when refused and replaced only when approved.
     target.unlink()
@@ -576,15 +652,19 @@ def test_target_mappings_are_portable_and_never_replace_conflicts(monkeypatch):
         operations.parse_target_mappings(["linux=~/item"])
     with pytest.raises(ValueError, match="safe path"):
         operations.parse_target_mappings(["windows=~/one/../two"])
-    config = {"dotfiles": {"saved": {"darwin": {"path": "~/old"}}}}
+    config = {"dotfiles": {f"files/{HASH}/saved": {"darwin": {"path": "~/old"}}}}
     with pytest.raises(ValueError, match="conflicting"):
-        operations.merge_targets(config, "saved", {"darwin": "~/new"})
+        operations.merge_targets(config, f"files/{HASH}/saved", {"darwin": "~/new"})
 
 
 def test_windows_targets_compare_case_insensitively_and_reject_dotfiles(monkeypatch):
     monkeypatch.setattr(operations, "os_name", lambda: "linux")
-    config = {"dotfiles": {"saved": {"windows": {"path": r"~\AppData\Tool"}}}}
-    merged = operations.merge_targets(config, "saved", {"windows": "~/appdata/tool"})
+    config = {
+        "dotfiles": {f"files/{HASH}/saved": {"windows": {"path": r"~\AppData\Tool"}}}
+    }
+    merged = operations.merge_targets(
+        config, f"files/{HASH}/saved", {"windows": "~/appdata/tool"}
+    )
     assert merged == config
     assert operations.validate_foreign_target("windows", "~/DOTFILES/tool") is not None
 
@@ -963,19 +1043,20 @@ def test_category_target_layouts_for_data(system, expected):
 def test_platform_specific_paths_reject_foreign_targets_and_share_move(
     tmp_path, monkeypatch
 ):
-    rel = "a" * 32 + "/darwin/item"
+    rel = f"files/{HASH}/darwin/item"
     assert operations.is_platform_specific_save_path(rel)
     with pytest.raises(ValueError, match="platform-specific"):
         operations.merge_targets({"dotfiles": {rel: {}}}, rel, {"linux": "~/item"})
     repo = tmp_path / "repo"
     repo.mkdir()
-    saved = repo / "saved"
+    saved = repo / "files" / HASH / "saved"
+    saved.parent.mkdir(parents=True)
     saved.write_text("saved")
     home = tmp_path / "home"
     home.mkdir()
     monkeypatch.setenv("HOME", str(home))
     monkeypatch.setattr(operations, "os_name", lambda: "linux")
-    config = _config("saved", "~/old")
+    config = _config(f"files/{HASH}/saved", "~/old")
     with pytest.raises(ValueError, match="different path"):
         operations.share(
             str(saved), str(home / "new"), config, str(repo), lambda _: True
@@ -998,17 +1079,17 @@ def test_add_moves_directory_and_records_link(tmp_path, monkeypatch):
     assert (
         tmp_path / "home" / ".config" / "app" / "settings"
     ).read_text() == "settings"
-    assert result.config["dotfiles"][os.path.relpath(saved, repo)]["linux"]["path"] == (
-        "~/.config/app"
-    )
+    assert result.config["dotfiles"][operations.save_path_to_key(saved, repo)]["linux"][
+        "path"
+    ] == ("~/.config/app")
 
 
 def test_remove_copies_shared_file_and_moves_unique_file_back(tmp_path, monkeypatch):
     repo = tmp_path / "repo"
-    shared_saved = repo / "shared" / "item"
-    unique_saved = repo / "unique" / "item"
+    shared_saved = repo / "files" / HASH / "shared"
+    unique_saved = repo / "files" / HASH / "unique"
     shared_saved.parent.mkdir(parents=True)
-    unique_saved.parent.mkdir()
+    unique_saved.parent.mkdir(parents=True, exist_ok=True)
     shared_saved.write_text("shared")
     unique_saved.write_text("unique")
     shared_install = tmp_path / "home" / "shared"
@@ -1018,11 +1099,11 @@ def test_remove_copies_shared_file_and_moves_unique_file_back(tmp_path, monkeypa
     unique_install.symlink_to(unique_saved)
     config = {
         "dotfiles": {
-            "shared/item": {
+            f"files/{HASH}/shared": {
                 "linux": {"path": str(shared_install)},
                 "darwin": {"path": "~/shared"},
             },
-            "unique/item": {"linux": {"path": str(unique_install)}},
+            f"files/{HASH}/unique": {"linux": {"path": str(unique_install)}},
         }
     }
     monkeypatch.setattr(operations, "os_name", lambda: "linux")
@@ -1033,7 +1114,7 @@ def test_remove_copies_shared_file_and_moves_unique_file_back(tmp_path, monkeypa
     assert shared_install.read_text() == "shared"
     assert not shared_install.is_symlink()
     assert shared_saved.exists()
-    assert "linux" not in shared_result.config["dotfiles"]["shared/item"]
+    assert "linux" not in shared_result.config["dotfiles"][f"files/{HASH}/shared"]
     assert unique_install.read_text() == "unique"
     assert not unique_install.is_symlink()
     assert not unique_saved.exists()
@@ -1044,8 +1125,8 @@ def test_remove_copies_shared_directory_and_moves_unique_directory_back(
     tmp_path, monkeypatch
 ):
     repo = tmp_path / "repo"
-    shared_saved = repo / "shared" / "item"
-    unique_saved = repo / "unique" / "item"
+    shared_saved = repo / "files" / HASH / "shared"
+    unique_saved = repo / "files" / HASH / "unique"
     shared_saved.mkdir(parents=True)
     unique_saved.mkdir(parents=True)
     (shared_saved / "settings").write_text("shared")
@@ -1057,11 +1138,11 @@ def test_remove_copies_shared_directory_and_moves_unique_directory_back(
     unique_install.symlink_to(unique_saved, target_is_directory=True)
     config = {
         "dotfiles": {
-            "shared/item": {
+            f"files/{HASH}/shared": {
                 "linux": {"path": str(shared_install)},
                 "darwin": {"path": "~/shared"},
             },
-            "unique/item": {"linux": {"path": str(unique_install)}},
+            f"files/{HASH}/unique": {"linux": {"path": str(unique_install)}},
         }
     }
     monkeypatch.setattr(operations, "os_name", lambda: "linux")
@@ -1082,7 +1163,7 @@ def test_remove_all_restores_local_shared_object_and_deletes_all_registrations(
     tmp_path, monkeypatch, kind
 ):
     repo = tmp_path / "repo"
-    saved = repo / "shared" / "item"
+    saved = repo / "files" / HASH / "shared"
     install = tmp_path / "home" / "item"
     saved.parent.mkdir(parents=True)
     install.parent.mkdir()
@@ -1094,7 +1175,7 @@ def test_remove_all_restores_local_shared_object_and_deletes_all_registrations(
     install.symlink_to(saved, target_is_directory=kind == "directory")
     config = {
         "dotfiles": {
-            "shared/item": {
+            f"files/{HASH}/shared": {
                 "linux": {"path": str(install)},
                 "darwin": {"path": "~/inaccessible"},
             }
@@ -1117,11 +1198,12 @@ def test_remove_all_without_current_registration_never_touches_foreign_path(
     tmp_path, monkeypatch
 ):
     repo = tmp_path / "repo"
-    saved = repo / "saved"
+    saved = repo / "files" / HASH / "saved"
     foreign = "/inaccessible/foreign/install"
     repo.mkdir()
+    saved.parent.mkdir(parents=True)
     saved.write_text("saved")
-    config = {"dotfiles": {"saved": {"darwin": {"path": foreign}}}}
+    config = {"dotfiles": {f"files/{HASH}/saved": {"darwin": {"path": foreign}}}}
     monkeypatch.setattr(operations, "os_name", lambda: "linux")
     original_lexists = operations.os.path.lexists
 
@@ -1141,16 +1223,17 @@ def test_remove_selected_foreign_mappings_never_touches_install_paths(
     tmp_path, monkeypatch
 ):
     repo = tmp_path / "repo"
-    saved = repo / "saved"
+    saved = repo / "files" / HASH / "saved"
     install = tmp_path / "home" / "install"
     foreign = "/inaccessible/foreign/install"
     repo.mkdir()
+    saved.parent.mkdir(parents=True)
     saved.write_text("saved")
     install.parent.mkdir()
     install.symlink_to(saved)
     config = {
         "dotfiles": {
-            "saved": {
+            f"files/{HASH}/saved": {
                 "linux": {"path": str(install)},
                 "darwin": {"path": foreign},
                 "windows": {"path": "~/other"},
@@ -1169,7 +1252,7 @@ def test_remove_selected_foreign_mappings_never_touches_install_paths(
         str(saved), config, str(repo), selected_systems={"darwin"}
     )
 
-    assert result.config["dotfiles"]["saved"] == {
+    assert result.config["dotfiles"][f"files/{HASH}/saved"] == {
         "linux": {"path": str(install)},
         "windows": {"path": "~/other"},
     }
@@ -1181,10 +1264,11 @@ def test_remove_selected_last_foreign_mapping_deletes_saved_object(
     tmp_path, monkeypatch
 ):
     repo = tmp_path / "repo"
-    saved = repo / "saved"
+    saved = repo / "files" / HASH / "saved"
     repo.mkdir()
+    saved.parent.mkdir(parents=True)
     saved.write_text("saved")
-    config = {"dotfiles": {"saved": {"darwin": {"path": "~/foreign"}}}}
+    config = {"dotfiles": {f"files/{HASH}/saved": {"darwin": {"path": "~/foreign"}}}}
     monkeypatch.setattr(operations, "os_name", lambda: "linux")
 
     result = operations.remove(
@@ -1197,16 +1281,17 @@ def test_remove_selected_last_foreign_mapping_deletes_saved_object(
 
 def test_remove_selected_current_and_foreign_mappings(tmp_path, monkeypatch):
     repo = tmp_path / "repo"
-    saved = repo / "saved"
+    saved = repo / "files" / HASH / "saved"
     install = tmp_path / "home" / "install"
     repo.mkdir()
+    saved.parent.mkdir(parents=True)
     saved.write_text("saved")
     install.parent.mkdir()
     install.symlink_to(saved)
     monkeypatch.setattr(operations, "os_name", lambda: "linux")
     config = {
         "dotfiles": {
-            "saved": {
+            f"files/{HASH}/saved": {
                 "linux": {"path": str(install)},
                 "darwin": {"path": "~/darwin"},
                 "windows": {"path": "~/windows"},
@@ -1218,7 +1303,9 @@ def test_remove_selected_current_and_foreign_mappings(tmp_path, monkeypatch):
         str(saved), config, str(repo), selected_systems={"linux", "darwin"}
     )
 
-    assert result.config["dotfiles"]["saved"] == {"windows": {"path": "~/windows"}}
+    assert result.config["dotfiles"][f"files/{HASH}/saved"] == {
+        "windows": {"path": "~/windows"}
+    }
     assert saved.read_text() == "saved"
     assert install.read_text() == "saved"
 
@@ -1227,16 +1314,17 @@ def test_remove_selected_current_and_all_mappings_moves_saved_object(
     tmp_path, monkeypatch
 ):
     repo = tmp_path / "repo"
-    saved = repo / "saved"
+    saved = repo / "files" / HASH / "saved"
     install = tmp_path / "home" / "install"
     repo.mkdir()
+    saved.parent.mkdir(parents=True)
     saved.write_text("saved")
     install.parent.mkdir()
     install.symlink_to(saved)
     monkeypatch.setattr(operations, "os_name", lambda: "linux")
     config = {
         "dotfiles": {
-            "saved": {
+            f"files/{HASH}/saved": {
                 "linux": {"path": str(install)},
                 "darwin": {"path": "~/darwin"},
             }
@@ -1257,13 +1345,14 @@ def test_remove_selected_empty_or_unknown_is_noop(
     tmp_path, monkeypatch, selected_systems
 ):
     repo = tmp_path / "repo"
-    saved = repo / "saved"
+    saved = repo / "files" / HASH / "saved"
     install = tmp_path / "home" / "install"
     repo.mkdir()
+    saved.parent.mkdir(parents=True)
     saved.write_text("saved")
     install.parent.mkdir()
     install.symlink_to(saved)
-    config = {"dotfiles": {"saved": {"linux": {"path": str(install)}}}}
+    config = {"dotfiles": {f"files/{HASH}/saved": {"linux": {"path": str(install)}}}}
     monkeypatch.setattr(operations, "os_name", lambda: "linux")
 
     result = operations.remove(
@@ -1279,9 +1368,10 @@ def test_remove_selected_empty_or_unknown_is_noop(
 def test_remove_is_silent_when_current_system_is_not_registered(tmp_path, monkeypatch):
     repo = tmp_path / "repo"
     repo.mkdir()
-    saved = repo / "saved"
+    saved = repo / "files" / HASH / "saved"
+    saved.parent.mkdir(parents=True)
     saved.write_text("saved")
-    config = {"dotfiles": {"saved": {"darwin": {"path": "~/old"}}}}
+    config = {"dotfiles": {f"files/{HASH}/saved": {"darwin": {"path": "~/old"}}}}
     monkeypatch.setattr(operations, "os_name", lambda: "linux")
 
     result = operations.remove(str(saved), config, str(repo))
@@ -1294,7 +1384,8 @@ def test_remove_is_silent_when_current_system_is_not_registered(tmp_path, monkey
 def test_remove_refuses_to_overwrite_non_link_install_path(tmp_path, monkeypatch):
     repo = tmp_path / "repo"
     repo.mkdir()
-    saved = repo / "saved"
+    saved = repo / "files" / HASH / "saved"
+    saved.parent.mkdir(parents=True)
     saved.write_text("saved")
     install = tmp_path / "home" / "install"
     install.parent.mkdir()
@@ -1302,7 +1393,9 @@ def test_remove_refuses_to_overwrite_non_link_install_path(tmp_path, monkeypatch
     monkeypatch.setattr(operations, "os_name", lambda: "linux")
 
     with pytest.raises(ValueError, match="not a managed link"):
-        operations.remove(str(saved), _config("saved", install), str(repo))
+        operations.remove(
+            str(saved), _config(f"files/{HASH}/saved", install), str(repo)
+        )
     assert install.read_text() == "unmanaged"
     assert saved.read_text() == "saved"
 
@@ -1315,7 +1408,7 @@ def test_config_only_validates_current_platform_install_paths(tmp_path, monkeypa
     monkeypatch.setattr(operations, "os_name", lambda: "linux")
     config = {
         "dotfiles": {
-            "saved": {
+            f"files/{HASH}/saved": {
                 "linux": {"path": "~/ok"},
                 "darwin": {"path": "/Users/example/ok"},
             }
@@ -1328,9 +1421,9 @@ def test_config_only_validates_current_platform_install_paths(tmp_path, monkeypa
 def test_view_plan_uses_readable_all_platform_relative_links(tmp_path, monkeypatch):
     home = tmp_path / "home"
     repo = home / "dotfiles"
-    saved = repo / "objects" / "item"
-    foreign = repo / "foreign"
-    windows_saved = repo / "windows"
+    saved = repo / "files" / HASH / "item"
+    foreign = repo / "files" / HASH / "foreign"
+    windows_saved = repo / "files" / HASH / "windows"
     saved.parent.mkdir(parents=True)
     saved.write_text("value")
     foreign.write_text("foreign value")
@@ -1339,9 +1432,9 @@ def test_view_plan_uses_readable_all_platform_relative_links(tmp_path, monkeypat
     monkeypatch.setattr(operations, "os_name", lambda: "linux")
     config = {
         "dotfiles": {
-            "objects/item": {"linux": {"path": "~/.config/app/item"}},
-            "foreign": {"darwin": {"path": "~/Library/item"}},
-            "windows": {"windows": {"path": "~/AppData/Local/app"}},
+            OBJECT_KEY: {"linux": {"path": "~/.config/app/item"}},
+            FOREIGN_KEY: {"darwin": {"path": "~/Library/item"}},
+            WINDOWS_KEY: {"windows": {"path": "~/AppData/Local/app"}},
         }
     }
 
@@ -1369,10 +1462,10 @@ def test_view_plan_uses_readable_all_platform_relative_links(tmp_path, monkeypat
     assert result.config is config
 
 
-def test_view_reads_legacy_backslash_saved_key_on_linux(tmp_path, monkeypatch):
+def test_view_rejects_legacy_backslash_saved_key_on_linux(tmp_path, monkeypatch):
     home = tmp_path / "home"
     repo = home / "dotfiles"
-    saved = repo / "saved" / "item"
+    saved = repo / "files" / HASH / "saved" / "item"
     saved.parent.mkdir(parents=True)
     saved.write_text("value")
     (repo / "dfm.yaml").write_text(
@@ -1381,11 +1474,8 @@ def test_view_reads_legacy_backslash_saved_key_on_linux(tmp_path, monkeypatch):
     monkeypatch.setenv("HOME", str(home))
     monkeypatch.setattr(operations, "os_name", lambda: "linux")
 
-    data = config.load_config(str(repo))
-    result = operations.view(data, str(repo))
-
-    assert data["dotfiles"] == {"saved/item": {"linux": {"path": "~/.item"}}}
-    assert result.messages == ["View 1 item(s)"]
+    with pytest.raises(ValueError, match="invalid saved path in dfm.yaml"):
+        config.load_config(str(repo))
 
 
 def test_view_projects_legacy_platform_paths_without_host_path_components(
@@ -1403,30 +1493,25 @@ def test_view_projects_legacy_platform_paths_without_host_path_components(
         "legacy": ("unknown/../CON", r"C:\legacy\settings"),
     }
     for name, (system, path) in paths.items():
-        (repo / name).write_text(name)
+        (repo / "files").mkdir(exist_ok=True)
+        (repo / "files" / name).write_text(name)
         config["dotfiles"][name] = {system: {"path": path}}
 
-    entries = operations.plan_view(config, str(repo))
-
-    assert len(entries) == len(paths)
-    assert all(
-        operations._view_path_within(entry.path, str(repo / "view"))
-        for entry in entries
-    )
-    assert all(
-        ".." not in os.path.relpath(entry.path, repo / "view").split(os.sep)
-        for entry in entries
-    )
+    with pytest.raises(ValueError, match="invalid saved path in dfm.yaml"):
+        operations.plan_view(config, str(repo))
 
 
 def test_view_accepts_unsafe_platform_names_with_safe_projection(tmp_path, monkeypatch):
     repo = tmp_path / "dotfiles"
     repo.mkdir()
-    (repo / "saved").write_text("saved")
+    (repo / "files" / HASH).mkdir(parents=True)
+    (repo / "files" / HASH).mkdir(exist_ok=True)
+    (repo / "files" / HASH / "saved").write_text("saved")
     monkeypatch.setattr(operations, "os_name", lambda: "linux")
 
     entry = operations.plan_view(
-        {"dotfiles": {"saved": {"../CON": {"path": "legacy/path"}}}}, str(repo)
+        {"dotfiles": {f"files/{HASH}/saved": {"../CON": {"path": "legacy/path"}}}},
+        str(repo),
     )[0]
 
     assert operations._view_path_within(entry.path, str(repo / "view"))
@@ -1438,16 +1523,17 @@ def test_view_uses_windows_target_case_rules_but_not_darwin_case_rules(
 ):
     repo = tmp_path / "dotfiles"
     repo.mkdir()
-    (repo / "one").write_text("one")
-    (repo / "two").write_text("two")
+    (repo / "files" / HASH).mkdir(parents=True)
+    (repo / "files" / HASH / "one").write_text("one")
+    (repo / "files" / HASH / "two").write_text("two")
     monkeypatch.setattr(operations, "os_name", lambda: "linux")
 
     with pytest.raises(ValueError, match="duplicate or overlap"):
         operations.plan_view(
             {
                 "dotfiles": {
-                    "one": {"windows": {"path": r"~\Foo"}},
-                    "two": {"windows": {"path": r"~\foo"}},
+                    ONE_KEY: {"windows": {"path": r"~\Foo"}},
+                    TWO_KEY: {"windows": {"path": r"~\foo"}},
                 }
             },
             str(repo),
@@ -1456,8 +1542,8 @@ def test_view_uses_windows_target_case_rules_but_not_darwin_case_rules(
         operations.plan_view(
             {
                 "dotfiles": {
-                    "one": {"windows": {"path": r"C:\Foo"}},
-                    "two": {"windows": {"path": r"c:\foo"}},
+                    ONE_KEY: {"windows": {"path": r"C:\Foo"}},
+                    TWO_KEY: {"windows": {"path": r"c:\foo"}},
                 }
             },
             str(repo),
@@ -1465,8 +1551,8 @@ def test_view_uses_windows_target_case_rules_but_not_darwin_case_rules(
     entries = operations.plan_view(
         {
             "dotfiles": {
-                "one": {"darwin": {"path": "~/Foo"}},
-                "two": {"darwin": {"path": "~/foo"}},
+                ONE_KEY: {"darwin": {"path": "~/Foo"}},
+                TWO_KEY: {"darwin": {"path": "~/foo"}},
             }
         },
         str(repo),
@@ -1480,9 +1566,10 @@ def test_view_preserves_colons_on_posix_hosts_and_escapes_them_on_windows(
 ):
     repo = tmp_path / "dotfiles"
     repo.mkdir()
-    (repo / "one").write_text("one")
+    (repo / "files" / HASH).mkdir(parents=True)
+    (repo / "files" / HASH / "one").write_text("one")
     monkeypatch.setattr(operations, "os_name", lambda: "linux")
-    config = {"dotfiles": {"one": {"darwin": {"path": "~/foo:bar"}}}}
+    config = {"dotfiles": {ONE_KEY: {"darwin": {"path": "~/foo:bar"}}}}
 
     entry = operations.plan_view(config, str(repo))[0]
 
@@ -1495,8 +1582,9 @@ def test_view_preserves_colons_on_posix_hosts_and_escapes_them_on_windows(
 def test_view_rejects_escaped_projection_parent_overlap(tmp_path, monkeypatch):
     repo = tmp_path / "dotfiles"
     repo.mkdir()
-    (repo / "one").write_text("one")
-    (repo / "two").write_text("two")
+    (repo / "files" / HASH).mkdir(parents=True)
+    (repo / "files" / HASH / "one").write_text("one")
+    (repo / "files" / HASH / "two").write_text("two")
     monkeypatch.setattr(operations, "os_name", lambda: "linux")
     monkeypatch.setattr(operations.os, "name", "nt")
 
@@ -1504,8 +1592,8 @@ def test_view_rejects_escaped_projection_parent_overlap(tmp_path, monkeypatch):
         operations.plan_view(
             {
                 "dotfiles": {
-                    "one": {"darwin": {"path": "~/:"}},
-                    "two": {"darwin": {"path": "~/v3a/child"}},
+                    ONE_KEY: {"darwin": {"path": "~/:"}},
+                    TWO_KEY: {"darwin": {"path": "~/v3a/child"}},
                 }
             },
             str(repo),
@@ -1516,7 +1604,9 @@ def test_view_staging_failure_keeps_existing_view(tmp_path, monkeypatch):
     home = tmp_path / "home"
     repo = home / "dotfiles"
     repo.mkdir(parents=True)
-    (repo / "saved").write_text("saved")
+    (repo / "files" / HASH).mkdir(parents=True)
+    (repo / "files" / HASH).mkdir(exist_ok=True)
+    (repo / "files" / HASH / "saved").write_text("saved")
     view = repo / "view"
     view.mkdir()
     marker = view / "old"
@@ -1530,7 +1620,7 @@ def test_view_staging_failure_keeps_existing_view(tmp_path, monkeypatch):
     )
 
     with pytest.raises(OSError, match="failed"):
-        operations.view(_config("saved", "~/item"), str(repo), force=True)
+        operations.view(_config(f"files/{HASH}/saved", "~/item"), str(repo), force=True)
 
     assert marker.read_text() == "old"
     assert not list(repo.glob(".view-staging-*"))
@@ -1540,7 +1630,9 @@ def test_view_second_replace_failure_restores_old_view(tmp_path, monkeypatch):
     home = tmp_path / "home"
     repo = home / "dotfiles"
     repo.mkdir(parents=True)
-    (repo / "saved").write_text("saved")
+    (repo / "files" / HASH).mkdir(parents=True)
+    (repo / "files" / HASH).mkdir(exist_ok=True)
+    (repo / "files" / HASH / "saved").write_text("saved")
     view = repo / "view"
     view.mkdir()
     marker = view / "old"
@@ -1559,7 +1651,7 @@ def test_view_second_replace_failure_restores_old_view(tmp_path, monkeypatch):
     monkeypatch.setattr(operations.os, "replace", fail_staging_replace)
 
     with pytest.raises(OSError, match="replace failed"):
-        operations.view(_config("saved", "~/item"), str(repo), force=True)
+        operations.view(_config(f"files/{HASH}/saved", "~/item"), str(repo), force=True)
 
     assert marker.read_text() == "old"
     assert not list(repo.glob(".view-staging-*"))
@@ -1569,7 +1661,9 @@ def test_view_backup_cleanup_failure_keeps_committed_view(tmp_path, monkeypatch)
     home = tmp_path / "home"
     repo = home / "dotfiles"
     repo.mkdir(parents=True)
-    (repo / "saved").write_text("saved")
+    (repo / "files" / HASH).mkdir(parents=True)
+    (repo / "files" / HASH).mkdir(exist_ok=True)
+    (repo / "files" / HASH / "saved").write_text("saved")
     (repo / "view").mkdir()
     monkeypatch.setenv("HOME", str(home))
     monkeypatch.setattr(operations, "os_name", lambda: "linux")
@@ -1582,11 +1676,15 @@ def test_view_backup_cleanup_failure_keeps_committed_view(tmp_path, monkeypatch)
 
     monkeypatch.setattr(operations.shutil, "rmtree", fail_backup_cleanup)
 
-    result = operations.view(_config("saved", "~/item"), str(repo), force=True)
+    result = operations.view(
+        _config(f"files/{HASH}/saved", "~/item"), str(repo), force=True
+    )
 
     assert result.messages == ["View 1 item(s)"]
     assert os.path.islink(
-        operations.plan_view(_config("saved", "~/item"), str(repo))[0].path
+        operations.plan_view(_config(f"files/{HASH}/saved", "~/item"), str(repo))[
+            0
+        ].path
     )
     assert list(repo.glob(".view-backup-*"))
 
@@ -1596,13 +1694,13 @@ def test_view_preserves_canonical_saved_symlink_and_directory_type(
 ):
     home = tmp_path / "home"
     repo = home / "dotfiles"
-    target = repo / "objects" / "directory"
+    target = repo / "files" / HASH / "directory"
     target.mkdir(parents=True)
-    saved = repo / "canonical-directory"
+    saved = repo / "files" / HASH / "canonical-directory"
     saved.symlink_to(target, target_is_directory=True)
     monkeypatch.setenv("HOME", str(home))
     monkeypatch.setattr(operations, "os_name", lambda: "linux")
-    config = _config("canonical-directory", "~/item")
+    config = _config(f"files/{HASH}/canonical-directory", "~/item")
 
     entry = operations.plan_view(config, str(repo))[0]
     operations.view(config, str(repo))
@@ -1616,7 +1714,7 @@ def test_view_preserves_canonical_saved_symlink_and_directory_type(
 def test_view_passes_directory_flag_to_symlink(tmp_path, monkeypatch):
     home = tmp_path / "home"
     repo = home / "dotfiles"
-    saved = repo / "directory"
+    saved = repo / "files" / HASH / "directory"
     saved.mkdir(parents=True)
     monkeypatch.setenv("HOME", str(home))
     monkeypatch.setattr(operations, "os_name", lambda: "windows")
@@ -1626,7 +1724,9 @@ def test_view_passes_directory_flag_to_symlink(tmp_path, monkeypatch):
         operations.os, "symlink", lambda *args, **kwargs: calls.append((args, kwargs))
     )
     try:
-        operations.view(_config("directory", "~/item", "windows"), str(repo))
+        operations.view(
+            _config(f"files/{HASH}/directory", "~/item", "windows"), str(repo)
+        )
     finally:
         symlink.undo()
 
@@ -1637,7 +1737,7 @@ def test_view_passes_directory_flag_to_symlink(tmp_path, monkeypatch):
 def test_view_namespace_is_rejected_as_configured_saved_path(tmp_path, rel_path):
     assert operations.validate_config(
         {"dotfiles": {rel_path: {}}}, str(tmp_path / "repo")
-    ) == ["view is reserved and cannot be a saved path"]
+    ) == ["invalid saved path in dfm.yaml"]
 
 
 def test_view_namespace_keeps_posix_key_backslashes_as_filenames(tmp_path):
@@ -1646,7 +1746,9 @@ def test_view_namespace_keeps_posix_key_backslashes_as_filenames(tmp_path):
     key = "view\\filename"
     (repo / key).write_text("file")
 
-    assert operations.validate_config({"dotfiles": {key: {}}}, str(repo)) == []
+    assert operations.validate_config({"dotfiles": {key: {}}}, str(repo)) == [
+        "invalid saved path in dfm.yaml"
+    ]
 
 
 def test_view_rejects_saved_alias_into_view_and_missing_source(tmp_path, monkeypatch):
@@ -1655,33 +1757,34 @@ def test_view_rejects_saved_alias_into_view_and_missing_source(tmp_path, monkeyp
     generated = repo / "view" / "item"
     generated.parent.mkdir(parents=True)
     generated.write_text("generated")
-    (repo / "alias").symlink_to(generated)
+    (repo / "files").mkdir()
+    (repo / "files" / "alias").symlink_to(generated)
     monkeypatch.setenv("HOME", str(home))
     monkeypatch.setattr(operations, "os_name", lambda: "linux")
 
     assert operations.validate_config(_config("alias", "~/item"), str(repo)) == [
-        "view is reserved and cannot be a saved path"
+        "invalid saved path in dfm.yaml"
     ]
     assert operations.validate_config(
         _config("alias/missing", "~/item"), str(repo)
-    ) == ["view is reserved and cannot be a saved path"]
-    with pytest.raises(ValueError, match="reserved view"):
+    ) == ["invalid saved path in dfm.yaml"]
+    with pytest.raises(ValueError, match="invalid saved path in dfm.yaml"):
         operations.plan_view(_config("alias", "~/item"), str(repo))
-    with pytest.raises(ValueError, match="supported saved"):
+    with pytest.raises(ValueError, match="invalid saved path in dfm.yaml"):
         operations.plan_view(_config("missing", "~/item"), str(repo))
 
 
 def test_view_alias_resolver_accepts_direct_hash_targets_and_rejects_others(tmp_path):
     repo = tmp_path / "dotfiles"
-    namespace = "a" * 32
-    saved = repo / namespace / "saved"
-    directory = repo / namespace / "directory"
+    namespace = HASH
+    saved = repo / "files" / namespace / "saved"
+    directory = repo / "files" / namespace / "directory"
     saved.parent.mkdir(parents=True)
     saved.write_text("value")
     directory.mkdir()
     internal_target = repo / "internal-target"
     internal_target.write_text("internal")
-    internal_saved = repo / namespace / "internal"
+    internal_saved = repo / "files" / namespace / "internal"
     internal_saved.symlink_to(internal_target)
     view = repo / "view"
     view.mkdir()
@@ -1702,17 +1805,22 @@ def test_view_alias_resolver_accepts_direct_hash_targets_and_rejects_others(tmp_
     outside.write_text("outside")
     non_hash = repo / "plain"
     non_hash.write_text("plain")
+    legacy_saved = repo / namespace / "legacy"
+    legacy_saved.parent.mkdir(parents=True)
+    legacy_saved.write_text("legacy")
     outside_link = view / "outside"
     non_hash_link = view / "plain"
+    legacy_link = view / "legacy"
     directory_link = view / "directory"
     dangling_link = view / "dangling"
-    escaping_saved = repo / namespace / "escaping"
+    escaping_saved = repo / "files" / namespace / "escaping"
     escaping_link = view / "escaping"
     regular_view_file = view / "regular"
     outside_link.symlink_to(outside)
     non_hash_link.symlink_to(non_hash)
+    legacy_link.symlink_to(legacy_saved)
     directory_link.symlink_to(directory, target_is_directory=True)
-    dangling_link.symlink_to(repo / namespace / "missing")
+    dangling_link.symlink_to(repo / "files" / namespace / "missing")
     escaping_saved.symlink_to(outside)
     escaping_link.symlink_to(escaping_saved)
     regular_view_file.write_text("regular")
@@ -1732,6 +1840,7 @@ def test_view_alias_resolver_accepts_direct_hash_targets_and_rejects_others(tmp_
     for path in (
         outside_link,
         non_hash_link,
+        legacy_link,
         dangling_link,
         escaping_link,
         regular_view_file,
@@ -1745,7 +1854,7 @@ def test_view_alias_resolver_accepts_direct_hash_targets_and_rejects_others(tmp_
 @pytest.mark.parametrize("trailing_slash", [False, True])
 def test_view_alias_resolver_rejects_view_root_symlink(tmp_path, trailing_slash):
     repo = tmp_path / "dotfiles"
-    saved = repo / ("a" * 32) / "saved"
+    saved = repo / "files" / HASH / "saved"
     saved.parent.mkdir(parents=True)
     saved.write_text("value")
     view = repo / "view"
@@ -1759,30 +1868,32 @@ def test_view_rejects_home_conflicts_and_unsafe_sources(tmp_path, monkeypatch):
     home = tmp_path / "home"
     repo = home / "dotfiles"
     repo.mkdir(parents=True)
-    (repo / "one").write_text("one")
-    (repo / "two").write_text("two")
+    (repo / "files" / HASH).mkdir(parents=True)
+    (repo / "files" / HASH / "one").write_text("one")
+    (repo / "files" / HASH / "two").write_text("two")
     monkeypatch.setenv("HOME", str(home))
     monkeypatch.setattr(operations, "os_name", lambda: "linux")
     with pytest.raises(ValueError, match="home itself"):
-        operations.plan_view(_config("one", "~"), str(repo))
+        operations.plan_view(_config(ONE_KEY, "~"), str(repo))
     with pytest.raises(ValueError, match="duplicate or overlap"):
         operations.plan_view(
             {
                 "dotfiles": {
-                    "one": {"linux": {"path": "~/.config"}},
-                    "two": {"linux": {"path": "~/.config/app"}},
+                    ONE_KEY: {"linux": {"path": "~/.config"}},
+                    TWO_KEY: {"linux": {"path": "~/.config/app"}},
                 }
             },
             str(repo),
         )
     (repo / ".git").mkdir()
     (repo / ".git" / "object").write_text("bad")
-    with pytest.raises(ValueError, match="safe canonical"):
-        operations.plan_view(_config(".git/object", "~/item"), str(repo))
+    (repo / "files" / "alias").symlink_to(repo / ".git" / "object")
+    with pytest.raises(ValueError, match="invalid saved path in dfm.yaml"):
+        operations.plan_view(_config("alias", "~/item"), str(repo))
     outside = tmp_path / "outside"
     outside.write_text("bad")
-    (repo / "outside-link").symlink_to(outside)
-    with pytest.raises(ValueError, match="safe canonical"):
+    (repo / "files" / "outside-link").symlink_to(outside)
+    with pytest.raises(ValueError, match="invalid saved path in dfm.yaml"):
         operations.plan_view(_config("outside-link", "~/item"), str(repo))
 
 
