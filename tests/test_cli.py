@@ -909,7 +909,11 @@ def test_doctor_fix_rebuilds_only_a_missing_install_link(tmp_path, monkeypatch):
     saved.write_text("content")
     cli.config.save_config(
         str(root),
-        {"dotfiles": {f"files/{HASH}/item": {"linux": {"path": str(install)}}}},
+        {
+            "dotfiles": {
+                f"files/{HASH}/item": {operations.os_name(): {"path": str(install)}}
+            }
+        },
     )
 
     cli._doctor(str(root), fix=True)
@@ -928,7 +932,11 @@ def test_doctor_fix_rejects_a_reparse_saved_ancestor(tmp_path, monkeypatch):
     saved.write_text("content")
     cli.config.save_config(
         str(root),
-        {"dotfiles": {f"files/{HASH}/item": {"linux": {"path": str(install)}}}},
+        {
+            "dotfiles": {
+                f"files/{HASH}/item": {operations.os_name(): {"path": str(install)}}
+            }
+        },
     )
     original = cli.operations._is_link_or_reparse
     monkeypatch.setattr(
@@ -956,7 +964,11 @@ def test_doctor_fix_rejects_a_symlinked_files_directory(tmp_path, monkeypatch):
     (root / "files").symlink_to(external_files, target_is_directory=True)
     cli.config.save_config(
         str(root),
-        {"dotfiles": {f"files/{HASH}/item": {"linux": {"path": str(install)}}}},
+        {
+            "dotfiles": {
+                f"files/{HASH}/item": {operations.os_name(): {"path": str(install)}}
+            }
+        },
     )
 
     with pytest.raises(SystemExit):
