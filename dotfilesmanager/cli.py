@@ -244,7 +244,7 @@ def _preconfirm_install(abs_save_path, dotfiles_config, root, force):
         state = operations._link_state(saved, install)
         if state == "correct":
             continue
-        if state == "missing" or state == "dangling" or force:
+        if state in ("missing", "dangling", "sync") or force:
             approved[rel_path] = state
         else:
             conflicts.append((rel_path, install, state))

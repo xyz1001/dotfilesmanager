@@ -539,7 +539,9 @@ def test_install_prompt_uses_one_checkbox_for_conflicting_destinations(
     tmp_path, monkeypatch
 ):
     root, config, paths = _install_prompt_fixture(tmp_path, ["conflict"])
-    paths["files/" + HASH + "/conflict"][1].write_text("existing")
+    wrong_target = tmp_path / "wrong-target"
+    wrong_target.write_text("existing")
+    paths["files/" + HASH + "/conflict"][1].symlink_to(wrong_target)
     prompt = Mock(return_value={"paths": ["files/" + HASH + "/conflict"]})
     monkeypatch.setattr(cli, "_prompt_targets", prompt)
 
@@ -554,12 +556,15 @@ def test_install_prompt_uses_one_checkbox_for_conflicting_destinations(
     ]
 
 
-def test_install_prompt_auto_approves_missing_and_dangling_without_checkbox(
+def test_install_prompt_auto_approves_missing_dangling_and_sync_without_checkbox(
     tmp_path, monkeypatch
 ):
-    root, config, paths = _install_prompt_fixture(tmp_path, ["missing", "dangling"])
+    root, config, paths = _install_prompt_fixture(
+        tmp_path, ["missing", "dangling", "sync"]
+    )
     dangling = paths["files/" + HASH + "/dangling"][1]
     dangling.symlink_to(tmp_path / "not-there")
+    paths["files/" + HASH + "/sync"][1].write_text("existing")
     prompt = Mock(side_effect=AssertionError("must not prompt"))
     monkeypatch.setattr(cli, "_prompt_targets", prompt)
 
@@ -568,13 +573,16 @@ def test_install_prompt_auto_approves_missing_and_dangling_without_checkbox(
     assert approved == {
         "files/" + HASH + "/missing": "missing",
         "files/" + HASH + "/dangling": "dangling",
+        "files/" + HASH + "/sync": "sync",
     }
     prompt.assert_not_called()
 
 
 def test_install_force_approves_conflicts_without_checkbox(tmp_path, monkeypatch):
     root, config, paths = _install_prompt_fixture(tmp_path, ["conflict"])
-    paths["files/" + HASH + "/conflict"][1].write_text("existing")
+    wrong_target = tmp_path / "wrong-target"
+    wrong_target.write_text("existing")
+    paths["files/" + HASH + "/conflict"][1].symlink_to(wrong_target)
     prompt = Mock(side_effect=AssertionError("must not prompt"))
     monkeypatch.setattr(cli, "_prompt_targets", prompt)
 
@@ -586,7 +594,9 @@ def test_install_force_approves_conflicts_without_checkbox(tmp_path, monkeypatch
 
 def test_install_checkbox_cancellation_returns_without_approvals(tmp_path, monkeypatch):
     root, config, paths = _install_prompt_fixture(tmp_path, ["conflict"])
-    paths["files/" + HASH + "/conflict"][1].write_text("existing")
+    wrong_target = tmp_path / "wrong-target"
+    wrong_target.write_text("existing")
+    paths["files/" + HASH + "/conflict"][1].symlink_to(wrong_target)
     monkeypatch.setattr(cli, "_prompt_targets", Mock(return_value=None))
 
     assert cli._preconfirm_install(None, config, str(root), False) is None

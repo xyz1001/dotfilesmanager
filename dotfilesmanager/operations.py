@@ -1217,14 +1217,27 @@ def install(abs_save_path, config, dotfiles_root, confirm_replace, accepted=None
             continue
         if accepted is not None and state != accepted[item_rel_save_path]:
             raise ValueError("install path changed after install preflight")
+        # A regular file at the destination is an existing source of truth when
+        # the saved object is also a file.  Preserve it before replacing it
+        # with the managed link; this case is intentionally not applied to
+        # directories.
+        if state == "sync":
+            approved.append(
+                (item_rel_save_path, item_abs_save_path, item_install_path, state)
+            )
+            continue
         # A broken destination symlink cannot provide a usable existing object,
         # so replace it without asking.  Other conflicts retain confirmation
         # semantics, including valid symlinks pointing at the wrong object.
         if state in ("missing", "dangling") or confirm_replace(item_install_path):
-            approved.append((item_rel_save_path, item_abs_save_path, item_install_path))
+            approved.append(
+                (item_rel_save_path, item_abs_save_path, item_install_path, state)
+            )
     messages = []
-    for item_rel_save_path, item_abs_save_path, item_install_path in approved:
+    for item_rel_save_path, item_abs_save_path, item_install_path, state in approved:
         # The preflight above already obtained consent; do not prompt again.
+        if state == "sync":
+            shutil.copyfile(item_install_path, item_abs_save_path)
         if _make_link(item_abs_save_path, item_install_path, lambda _: True):
             messages.append(f"Install {item_rel_save_path} -> {item_install_path}")
     return OperationResult(config, messages)
@@ -1235,6 +1248,12 @@ def _link_state(target, link):
     if not os.path.lexists(link):
         return "missing"
     if not os.path.islink(link):
+        if (
+            os.path.isfile(target)
+            and not os.path.islink(target)
+            and os.path.isfile(link)
+        ):
+            return "sync"
         return "conflict"
     if not os.path.exists(link):
         return "dangling"

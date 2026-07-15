@@ -523,7 +523,7 @@ def test_install_skips_other_systems_and_reports_unknown_item(tmp_path, monkeypa
     assert unknown.messages == ["files/missing is not kept in dotfiles"]
 
 
-@pytest.mark.parametrize("existing", ["file", "directory"])
+@pytest.mark.parametrize("existing", ["directory"])
 def test_install_replaces_file_or_directory_only_when_confirmed(
     tmp_path, monkeypatch, existing
 ):
@@ -556,6 +556,33 @@ def test_install_replaces_file_or_directory_only_when_confirmed(
     assert install_path.is_symlink()
     assert os.readlink(install_path) == str(saved)
     assert installed.messages == [f"Install files/{HASH}/saved -> {install_path}"]
+
+
+def test_install_syncs_existing_file_before_linking_without_confirmation(
+    tmp_path, monkeypatch
+):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    saved = repo / "files" / HASH / "saved"
+    saved.parent.mkdir(parents=True)
+    saved.write_text("old")
+    install_path = tmp_path / "home" / "target"
+    install_path.parent.mkdir()
+    install_path.write_text("new")
+    config = _config(f"files/{HASH}/saved", install_path)
+    monkeypatch.setattr(operations, "os_name", lambda: "linux")
+
+    result = operations.install(
+        str(saved),
+        config,
+        str(repo),
+        lambda _: pytest.fail("file synchronization must not request confirmation"),
+    )
+
+    assert saved.read_text() == "new"
+    assert install_path.is_symlink()
+    assert os.readlink(install_path) == str(saved)
+    assert result.messages == [f"Install files/{HASH}/saved -> {install_path}"]
 
 
 def test_install_replaces_dangling_destination_without_confirmation(
