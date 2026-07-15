@@ -922,6 +922,28 @@ def test_doctor_fix_rebuilds_only_a_missing_install_link(tmp_path, monkeypatch):
     assert install.resolve() == saved
 
 
+def test_doctor_accepts_windows_extended_link_target(tmp_path, monkeypatch):
+    root = tmp_path / "root"
+    saved = root / "files" / HASH / "item"
+    install = tmp_path / "home" / "install" / "item"
+    saved.parent.mkdir(parents=True)
+    install.parent.mkdir(parents=True)
+    saved.write_text("content")
+    cli.config.save_config(
+        str(root),
+        {
+            "dotfiles": {
+                f"files/{HASH}/item": {operations.os_name(): {"path": str(install)}}
+            }
+        },
+    )
+    install.symlink_to(saved)
+    monkeypatch.setattr(cli.os, "name", "nt")
+    monkeypatch.setattr(cli.os, "readlink", lambda _: "\\\\?\\" + str(saved))
+
+    assert cli._doctor_problems(str(root), cli.config.load_config(str(root))) == []
+
+
 def test_doctor_fix_rejects_a_reparse_saved_ancestor(tmp_path, monkeypatch):
     monkeypatch.setenv("HOME", str(tmp_path / "home"))
     root = tmp_path / "root"

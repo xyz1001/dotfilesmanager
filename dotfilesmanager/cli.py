@@ -1,6 +1,7 @@
 """Command-line adapter for dotfilesmanager."""
 
 import copy
+import ntpath
 import os
 import re
 import stat
@@ -469,16 +470,29 @@ def _doctor_problems(root, dotfiles_config):
             problems.append(f"install path is not a link: {install}")
         else:
             target = os.readlink(install)
-            if not os.path.isabs(target):
-                target = os.path.join(os.path.dirname(install), target)
-            if os.path.abspath(os.path.normpath(target)) != os.path.abspath(
-                os.path.normpath(saved)
-            ):
+            if not _link_target_matches(target, install, saved):
                 problems.append(f"wrong install link: {install}")
             elif not os.path.exists(install):
                 problems.append(f"dangling install link: {install}")
     problems.extend(_unreferenced_saved_objects(root, dotfiles_config))
     return problems
+
+
+def _link_target_matches(target, install, saved):
+    """Compare a link target using Windows' native link-path spelling."""
+    if os.name == "nt":
+        path_module = ntpath
+        if target.startswith("\\\\?\\UNC\\"):
+            target = "\\\\" + target[8:]
+        elif target.startswith(("\\\\?\\", "\\??\\")):
+            target = target[4:]
+    else:
+        path_module = os.path
+    if not path_module.isabs(target):
+        target = path_module.join(path_module.dirname(install), target)
+    return path_module.normcase(path_module.abspath(path_module.normpath(target))) == (
+        path_module.normcase(path_module.abspath(path_module.normpath(saved)))
+    )
 
 
 def _safe_install_parent(path):
