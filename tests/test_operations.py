@@ -658,6 +658,7 @@ def test_windows_current_mapping_and_link_state_are_case_insensitive(monkeypatch
 
     monkeypatch.setattr(operations.os.path, "lexists", lambda _: True)
     monkeypatch.setattr(operations.os.path, "islink", lambda _: True)
+    monkeypatch.setattr(operations.os.path, "exists", lambda _: True)
     monkeypatch.setattr(operations.os, "readlink", lambda _: r"..\SAVED")
     assert (
         operations._link_state(r"c:\users\alice\Saved", r"C:\Users\Alice\Target\link")

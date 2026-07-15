@@ -232,6 +232,7 @@ def _preconfirm_install(abs_save_path, dotfiles_config, root, force):
     if abs_save_path is not None:
         selected = operations.save_path_to_key(abs_save_path, root)
     approved = {}
+    conflicts = []
     for rel_path in dotfiles_config["dotfiles"]:
         if selected is not None and operations.canonical_save_key(rel_path) != selected:
             continue
@@ -242,7 +243,26 @@ def _preconfirm_install(abs_save_path, dotfiles_config, root, force):
         state = operations._link_state(saved, install)
         if state == "correct":
             continue
-        if state == "missing" or force or _confirm_replace(install):
+        if state == "missing" or state == "dangling" or force:
+            approved[rel_path] = state
+        else:
+            conflicts.append((rel_path, install, state))
+    if force or not conflicts:
+        return approved
+    answers = _prompt_targets(
+        [
+            inquirer.Checkbox(
+                "paths",
+                message="Select destination paths to replace",
+                choices=[(install, rel_path) for rel_path, install, _ in conflicts],
+            )
+        ]
+    )
+    if answers is None or "paths" not in answers:
+        return None
+    selected_paths = set(answers["paths"])
+    for rel_path, _, state in conflicts:
+        if rel_path in selected_paths:
             approved[rel_path] = state
     return approved
 
@@ -627,6 +647,8 @@ def _main():
                 root,
                 args.get("--force", False),
             )
+            if install_approved is None:
+                return None
         # Share must not rewrite YAML when the user declines replacement.
         if command == "share":
             share_install = operations.normalize_path(args["<install_path>"])

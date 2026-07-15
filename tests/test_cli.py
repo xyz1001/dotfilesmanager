@@ -508,6 +508,80 @@ def test_remove_selector_bypasses_prompt_for_non_tty_and_all(monkeypatch):
     prompt.assert_not_called()
 
 
+def _install_prompt_fixture(tmp_path, names):
+    root = tmp_path / "repo"
+    saved_dir = root / "files" / HASH
+    saved_dir.mkdir(parents=True)
+    config = {"dotfiles": {}}
+    paths = {}
+    for name in names:
+        key = f"files/{HASH}/{name}"
+        saved = saved_dir / name
+        saved.write_text(name)
+        install = tmp_path / "home" / name
+        install.parent.mkdir(exist_ok=True)
+        config["dotfiles"][key] = {"linux": {"path": str(install)}}
+        paths[key] = (saved, install)
+    return root, config, paths
+
+
+def test_install_prompt_uses_one_checkbox_for_conflicting_destinations(
+    tmp_path, monkeypatch
+):
+    root, config, paths = _install_prompt_fixture(tmp_path, ["conflict"])
+    paths["files/" + HASH + "/conflict"][1].write_text("existing")
+    prompt = Mock(return_value={"paths": ["files/" + HASH + "/conflict"]})
+    monkeypatch.setattr(cli, "_prompt_targets", prompt)
+
+    approved = cli._preconfirm_install(None, config, str(root), False)
+
+    assert approved == {"files/" + HASH + "/conflict": "conflict"}
+    prompt.assert_called_once()
+    checkbox = prompt.call_args.args[0][0]
+    assert checkbox.message == "Select destination paths to replace"
+    assert [(choice.label, choice.value) for choice in checkbox.choices] == [
+        (str(paths["files/" + HASH + "/conflict"][1]), "files/" + HASH + "/conflict")
+    ]
+
+
+def test_install_prompt_auto_approves_missing_and_dangling_without_checkbox(
+    tmp_path, monkeypatch
+):
+    root, config, paths = _install_prompt_fixture(tmp_path, ["missing", "dangling"])
+    dangling = paths["files/" + HASH + "/dangling"][1]
+    dangling.symlink_to(tmp_path / "not-there")
+    prompt = Mock(side_effect=AssertionError("must not prompt"))
+    monkeypatch.setattr(cli, "_prompt_targets", prompt)
+
+    approved = cli._preconfirm_install(None, config, str(root), False)
+
+    assert approved == {
+        "files/" + HASH + "/missing": "missing",
+        "files/" + HASH + "/dangling": "dangling",
+    }
+    prompt.assert_not_called()
+
+
+def test_install_force_approves_conflicts_without_checkbox(tmp_path, monkeypatch):
+    root, config, paths = _install_prompt_fixture(tmp_path, ["conflict"])
+    paths["files/" + HASH + "/conflict"][1].write_text("existing")
+    prompt = Mock(side_effect=AssertionError("must not prompt"))
+    monkeypatch.setattr(cli, "_prompt_targets", prompt)
+
+    approved = cli._preconfirm_install(None, config, str(root), True)
+
+    assert approved == {"files/" + HASH + "/conflict": "conflict"}
+    prompt.assert_not_called()
+
+
+def test_install_checkbox_cancellation_returns_without_approvals(tmp_path, monkeypatch):
+    root, config, paths = _install_prompt_fixture(tmp_path, ["conflict"])
+    paths["files/" + HASH + "/conflict"][1].write_text("existing")
+    monkeypatch.setattr(cli, "_prompt_targets", Mock(return_value=None))
+
+    assert cli._preconfirm_install(None, config, str(root), False) is None
+
+
 @pytest.mark.parametrize("dry_run", [False, True])
 def test_remove_foreign_selection_skips_current_preflight(monkeypatch, dry_run):
     result = operations.OperationResult({"dotfiles": {}}, [])
