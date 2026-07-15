@@ -899,6 +899,73 @@ def test_click_root_option_is_passed_to_runner(monkeypatch):
     assert seen[0]["--root"] == "custom"
 
 
+def test_doctor_fix_rebuilds_only_a_missing_install_link(tmp_path, monkeypatch):
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    root = tmp_path / "root"
+    saved = root / "files" / HASH / "item"
+    install = tmp_path / "home" / "install" / "item"
+    saved.parent.mkdir(parents=True)
+    install.parent.mkdir(parents=True)
+    saved.write_text("content")
+    cli.config.save_config(
+        str(root),
+        {"dotfiles": {f"files/{HASH}/item": {"linux": {"path": str(install)}}}},
+    )
+
+    cli._doctor(str(root), fix=True)
+
+    assert install.is_symlink()
+    assert install.resolve() == saved
+
+
+def test_doctor_fix_rejects_a_reparse_saved_ancestor(tmp_path, monkeypatch):
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    root = tmp_path / "root"
+    saved = root / "files" / HASH / "item"
+    install = tmp_path / "home" / "install" / "item"
+    saved.parent.mkdir(parents=True)
+    install.parent.mkdir(parents=True)
+    saved.write_text("content")
+    cli.config.save_config(
+        str(root),
+        {"dotfiles": {f"files/{HASH}/item": {"linux": {"path": str(install)}}}},
+    )
+    original = cli.operations._is_link_or_reparse
+    monkeypatch.setattr(
+        cli.operations,
+        "_is_link_or_reparse",
+        lambda path: path == str(saved.parent) or original(path),
+    )
+
+    with pytest.raises(SystemExit):
+        cli._doctor(str(root), fix=True)
+
+    assert not install.exists()
+
+
+def test_doctor_fix_rejects_a_symlinked_files_directory(tmp_path, monkeypatch):
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    root = tmp_path / "root"
+    external_files = tmp_path / "external-files"
+    saved = external_files / HASH / "item"
+    install = tmp_path / "home" / "install" / "item"
+    saved.parent.mkdir(parents=True)
+    install.parent.mkdir(parents=True)
+    saved.write_text("content")
+    root.mkdir()
+    (root / "files").symlink_to(external_files, target_is_directory=True)
+    cli.config.save_config(
+        str(root),
+        {"dotfiles": {f"files/{HASH}/item": {"linux": {"path": str(install)}}}},
+    )
+
+    with pytest.raises(SystemExit):
+        cli._doctor(str(root), fix=True)
+
+    assert not install.exists()
+    assert saved.read_text() == "content"
+
+
 def test_cli_root_takes_priority_over_dfm_root(monkeypatch, tmp_path):
     selected = []
     monkeypatch.setenv("DFM_ROOT", str(tmp_path / "environment"))

@@ -3,6 +3,7 @@
 import copy
 import os
 import re
+import stat
 import sys
 from dataclasses import dataclass
 from typing import Any, Dict, Optional, Set, cast
@@ -453,8 +454,177 @@ def _prepare_direct_command(command, args, root, dry_run):
     return prepared
 
 
-def _doctor(root):
+def _doctor_problems(root, dotfiles_config):
     problems = []
+    for rel_path in dotfiles_config["dotfiles"]:
+        saved = operations.key_to_save_path(rel_path, root)
+        if not os.path.lexists(saved):
+            problems.append(f"missing saved path: {rel_path}")
+        install = operations.get_path(dotfiles_config, rel_path)
+        if not install:
+            continue
+        if not os.path.lexists(install):
+            problems.append(f"missing install link: {install}")
+        elif not os.path.islink(install):
+            problems.append(f"install path is not a link: {install}")
+        else:
+            target = os.readlink(install)
+            if not os.path.isabs(target):
+                target = os.path.join(os.path.dirname(install), target)
+            if os.path.abspath(os.path.normpath(target)) != os.path.abspath(
+                os.path.normpath(saved)
+            ):
+                problems.append(f"wrong install link: {install}")
+            elif not os.path.exists(install):
+                problems.append(f"dangling install link: {install}")
+    problems.extend(_unreferenced_saved_objects(root, dotfiles_config))
+    return problems
+
+
+def _safe_install_parent(path):
+    """Return whether every existing install parent is a real directory."""
+    parent = os.path.abspath(os.path.dirname(path))
+    while parent:
+        if not os.path.isdir(parent) or operations._is_link_or_reparse(parent):
+            return False
+        if parent == os.path.dirname(parent):
+            break
+        parent = os.path.dirname(parent)
+    return True
+
+
+def _safe_saved_path(root, saved):
+    """Check every saved-object component before using it as a link target."""
+    root = os.path.abspath(root)
+    files_root = os.path.join(root, "files")
+    saved = os.path.abspath(saved)
+    if (
+        operations._is_link_or_reparse(root)
+        or not os.path.isdir(root)
+        or operations._is_link_or_reparse(files_root)
+        or not os.path.isdir(files_root)
+        or not operations._is_within(saved, files_root)
+    ):
+        return None
+    relative = os.path.relpath(saved, files_root)
+    components = relative.split(os.sep)
+    if len(components) < 2 or not re.fullmatch(r"[0-9a-f]{32}", components[0]):
+        return None
+    current = files_root
+    for component in components:
+        current = os.path.join(current, component)
+        if not os.path.lexists(current) or operations._is_link_or_reparse(current):
+            return None
+        if current != saved and not os.path.isdir(current):
+            return None
+    try:
+        mode = os.stat(saved).st_mode
+    except OSError:
+        return None
+    if not (stat.S_ISREG(mode) or stat.S_ISDIR(mode)):
+        return None
+    return mode
+
+
+def _fix_missing_install_links(root, dotfiles_config):
+    fixed = []
+    failures = []
+    for rel_path in dotfiles_config["dotfiles"]:
+        saved = operations.key_to_save_path(rel_path, root)
+        install = operations.get_path(dotfiles_config, rel_path)
+        if not install or not os.path.lexists(saved):
+            continue
+        saved_mode = _safe_saved_path(root, saved)
+        if saved_mode is None:
+            continue
+        if os.path.lexists(install) or not _safe_install_parent(install):
+            continue
+        # Recheck immediately before creation; an existing destination is never
+        # replaced, even if it appeared after the first check.
+        if os.path.lexists(install):
+            continue
+        try:
+            windows.create_symlink(
+                saved, install, target_is_directory=stat.S_ISDIR(saved_mode)
+            )
+            fixed.append(f"missing install link: {install}")
+        except Exception as error:
+            failures.append(f"could not fix missing install link {install}: {error}")
+    return fixed, failures
+
+
+def _safe_cleanup_unreferenced(root, dotfiles_config):
+    """Remove only unreferenced, ordinary children of real hash namespaces."""
+    managed = {
+        os.path.abspath(operations.key_to_save_path(path, root))
+        for path in dotfiles_config["dotfiles"]
+    }
+    files_root = os.path.join(root, "files")
+    if operations._is_link_or_reparse(files_root) or not os.path.isdir(files_root):
+        return []
+    removed = []
+
+    def protected(path):
+        return any(
+            path == saved
+            or operations._is_within(path, saved)
+            or operations._is_within(saved, path)
+            for saved in managed
+        )
+
+    def clean(path, namespace):
+        if not operations._is_within(path, namespace):
+            return
+        if os.path.islink(path):
+            if not protected(path):
+                try:
+                    os.unlink(path)
+                    removed.append(path)
+                except OSError:
+                    pass
+            return
+        # A Windows reparse point which is not a symlink is not safe to inspect.
+        if operations._is_link_or_reparse(path):
+            return
+        try:
+            mode = os.lstat(path).st_mode
+        except OSError:
+            return
+        if stat.S_ISDIR(mode):
+            try:
+                entries = list(os.scandir(path))
+            except OSError:
+                return
+            for entry in entries:
+                clean(os.path.abspath(entry.path), namespace)
+            if path != namespace and not protected(path):
+                try:
+                    os.rmdir(path)
+                    removed.append(path)
+                except OSError:
+                    pass
+        elif stat.S_ISREG(mode) and not protected(path):
+            try:
+                os.unlink(path)
+                removed.append(path)
+            except OSError:
+                pass
+
+    for namespace in os.listdir(files_root):
+        if not re.fullmatch(r"[0-9a-f]{32}", namespace):
+            continue
+        namespace_path = os.path.abspath(os.path.join(files_root, namespace))
+        if not os.path.isdir(namespace_path) or operations._is_link_or_reparse(
+            namespace_path
+        ):
+            continue
+        clean(namespace_path, namespace_path)
+    return removed
+
+
+def _doctor(root, fix=False):
+    problems = []
+    fixed = []
     if not os.path.isdir(root):
         _fail(f"dotfiles root does not exist: {root}")
     try:
@@ -462,30 +632,19 @@ def _doctor(root):
         problems.extend(operations.validate_config(dotfiles_config, root))
         if not problems:
             dotfiles_config = cast(Config, dotfiles_config)
-            for rel_path in dotfiles_config["dotfiles"]:
-                saved = operations.key_to_save_path(rel_path, root)
-                if not os.path.lexists(saved):
-                    problems.append(f"missing saved path: {rel_path}")
-                install = operations.get_path(dotfiles_config, rel_path)
-                if not install:
-                    continue
-                if not os.path.lexists(install):
-                    problems.append(f"missing install link: {install}")
-                elif not os.path.islink(install):
-                    problems.append(f"install path is not a link: {install}")
-                else:
-                    target = os.readlink(install)
-                    if not os.path.isabs(target):
-                        target = os.path.join(os.path.dirname(install), target)
-                    if os.path.abspath(os.path.normpath(target)) != os.path.abspath(
-                        os.path.normpath(saved)
-                    ):
-                        problems.append(f"wrong install link: {install}")
-                    elif not os.path.exists(install):
-                        problems.append(f"dangling install link: {install}")
-            problems.extend(_unreferenced_saved_objects(root, dotfiles_config))
+            if fix:
+                fixed, fix_failures = _fix_missing_install_links(root, dotfiles_config)
+                fixed.extend(
+                    f"unreferenced saved object: {path} removed"
+                    for path in _safe_cleanup_unreferenced(root, dotfiles_config)
+                )
+                problems.extend(fix_failures)
+            # Always rescan after a fix; this also preserves unfixable diagnoses.
+            problems.extend(_doctor_problems(root, dotfiles_config))
     except Exception as error:
         problems.append(f"Invalid configuration: {error}")
+    for message in fixed:
+        print(f"Fixed: {message}")
     if problems:
         for problem in problems:
             print(problem)
@@ -560,6 +719,7 @@ _CLICK_OPTION_COMMANDS = {
     "dry_run": {"add", "rm", "install", "share", "view"},
     "force": {"add", "rm", "install", "share"},
     "all": {"rm"},
+    "fix": {"doctor"},
 }
 
 
@@ -593,6 +753,7 @@ def _build_command_args(command, root_options, command_options):
             "--force": values.get("force", False),
             "--all": values.get("all", False),
             "--root": values.get("root"),
+            "--fix": values.get("fix", False),
             "<install_path>": command_options.get("install_path"),
             "<save_path>": command_options.get("save_path"),
             "<path>": command_options.get("path"),
@@ -622,6 +783,7 @@ def _root_click_options(function):
         click.option("--non-interactive", "non_interactive", is_flag=True, hidden=True),
         click.option("--encrypt", is_flag=True, hidden=True),
         click.option("--system", is_flag=True, hidden=True),
+        click.option("--fix", is_flag=True, hidden=True),
     ):
         function = option(function)
     return function
@@ -780,10 +942,11 @@ def view(ctx, **options):
 
 
 @click_app.command(context_settings={"help_option_names": ["-h", "--help"]})
+@click.option("--fix", is_flag=True, help="Repair safe, automatically fixable issues.")
 @click.pass_context
-def doctor(ctx):
+def doctor(ctx, **options):
     """Check the configuration, saved objects, and install links for consistency."""
-    return _run_click_command(ctx, "doctor")
+    return _run_click_command(ctx, "doctor", **options)
 
 
 @click_app.command(context_settings={"help_option_names": ["-h", "--help"]})
@@ -803,7 +966,10 @@ def _run_parsed_command(args):
         return
     root = config.resolve_dotfiles_root(args.get("--root"))
     if args.get("doctor"):
-        _doctor(root)
+        if args.get("--fix", False):
+            _doctor(root, fix=True)
+        else:
+            _doctor(root)
         return
     command = next(
         name for name in ("add", "rm", "install", "share", "view") if args.get(name)

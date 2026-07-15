@@ -40,6 +40,35 @@ def test_direct_add_then_rm_all(tmp_path, monkeypatch):
     assert config.load_config(str(root)) == {"dotfiles": {}}
 
 
+def test_doctor_fix_preserves_conflicts_and_does_not_follow_orphan_links(
+    tmp_path, monkeypatch
+):
+    home, root = _environment(tmp_path, monkeypatch)
+    saved = root / "files" / HASH / "item"
+    install = home / ".item"
+    saved.parent.mkdir(parents=True)
+    saved.write_text("saved")
+    install.write_text("existing")
+    external = tmp_path / "external"
+    external.write_text("outside")
+    orphan = root / "files" / HASH / "orphan"
+    orphan.write_text("remove")
+    orphan_link = root / "files" / HASH / "orphan-link"
+    orphan_link.symlink_to(external)
+    config.save_config(
+        str(root),
+        {"dotfiles": {f"files/{HASH}/item": {"linux": {"path": str(install)}}}},
+    )
+
+    with pytest.raises(SystemExit):
+        _run(monkeypatch, "doctor", "--fix")
+
+    assert install.read_text() == "existing"
+    assert not orphan.exists()
+    assert not os.path.lexists(orphan_link)
+    assert external.read_text() == "outside"
+
+
 def test_direct_rm_all_restores_current_and_removes_foreign_registration(
     tmp_path, monkeypatch
 ):

@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "dotfilesmanager"
-version = "1.15.0"
+version = "1.16.0"
 description = "dotfile管理工具，支持多平台"
 readme = "README.md"
 requires-python = ">=3.8"
