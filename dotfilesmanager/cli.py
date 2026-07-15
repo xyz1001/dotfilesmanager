@@ -7,35 +7,12 @@ import sys
 from dataclasses import dataclass
 from typing import Any, Dict, Optional, Set, cast
 
+import click
 import inquirer
-from docopt import docopt
 from inquirer.errors import ValidationError
 
 from . import config, operations, windows
 from ._types import Config
-
-USAGE = """
-dotfile管理工具(dotfiles manager)，dotfile指保存配置信息的文件或包含配置文件的文件夹
-
-Usage:
-    dfm add <install_path> [--system] [--encrypt] [--non-interactive] [--target=<mapping>...] [--dry-run] [--force]
-    dfm rm <path> [--all] [--dry-run] [--force]
-    dfm install [<save_path>] [--dry-run] [--force]
-    dfm share <save_path> <install_path> [--non-interactive] [--target=<mapping>...] [--dry-run] [--force]
-    dfm view [--dry-run]
-    dfm doctor
-    dfm setup
-
-Options:
-    -h --help  显示帮助
-    --system   该dotfile和操作系统相关
-    --encrypt  Encrypt the newly saved object with git-crypt.
-    --non-interactive  Never read stdin; required for --target and non-TTY use.
-    --target=<mapping>  Foreign target mapping, repeated as SYSTEM=~/path.
-    --dry-run  Validate and show what would be changed without writing.
-    --force    Do not ask before replacing an existing path.
-    --all      Remove registrations for every platform.
-"""
 
 
 def _confirm_replace(link):
@@ -196,7 +173,7 @@ def _select_targets(
         # explicit saved_path argument.  Command preparation never relies on it.
         saved_path = args.get("_saved")
     supplied = args.get("--target", []) or []
-    # The default preserves direct callers which predate these docopt keys.
+    # The default preserves direct callers which predate these normalized keys.
     non_interactive = args.get("--non-interactive", True)
     if command == "add" and args.get("--system", False):
         return {}
@@ -559,7 +536,14 @@ def _unreferenced_saved_objects(root, dotfiles_config):
 
 def main():
     try:
-        _main()
+        click_app.main(standalone_mode=False)
+    except click.ClickException as error:
+        error.show()
+        raise SystemExit(error.exit_code) from None
+    except click.exceptions.Exit as error:
+        if error.exit_code:
+            raise SystemExit(error.exit_code) from None
+        return
     except windows.SymlinkPrivilegeError:
         _fail(
             "Windows could not create a symbolic link because the required "
@@ -568,8 +552,241 @@ def main():
         )
 
 
-def _main():
-    args = docopt(USAGE)
+_CLICK_OPTION_COMMANDS = {
+    "system": {"add"},
+    "encrypt": {"add"},
+    "non_interactive": {"add", "share"},
+    "target": {"add", "share"},
+    "dry_run": {"add", "rm", "install", "share", "view"},
+    "force": {"add", "rm", "install", "share"},
+    "all": {"rm"},
+}
+
+
+def _build_command_args(command, root_options, command_options):
+    """Build the normalized argument mapping consumed by the existing runner."""
+    values = dict(root_options)
+    for name, value in command_options.items():
+        if name == "target":
+            values[name] = [*values.get(name, ()), *value]
+        elif value:
+            values[name] = value
+
+    for name, commands in _CLICK_OPTION_COMMANDS.items():
+        value = values.get(name, () if name == "target" else False)
+        if value and command not in commands:
+            option = "--" + name.replace("_", "-")
+            raise click.UsageError(f"{option} is not valid for {command}")
+
+    args = {
+        name: False
+        for name in ("add", "rm", "install", "share", "view", "doctor", "setup")
+    }
+    args[command] = True
+    args.update(
+        {
+            "--system": values.get("system", False),
+            "--encrypt": values.get("encrypt", False),
+            "--non-interactive": values.get("non_interactive", False),
+            "--target": list(values.get("target", ())),
+            "--dry-run": values.get("dry_run", False),
+            "--force": values.get("force", False),
+            "--all": values.get("all", False),
+            "<install_path>": command_options.get("install_path"),
+            "<save_path>": command_options.get("save_path"),
+            "<path>": command_options.get("path"),
+        }
+    )
+    return args
+
+
+def _run_click_command(ctx, command, **command_options):
+    args = _build_command_args(command, ctx.obj["root_options"], command_options)
+    return _run_parsed_command(args)
+
+
+def _root_click_options(function):
+    for option in (
+        click.option("--all", "all", is_flag=True, hidden=True),
+        click.option("--force", is_flag=True, hidden=True),
+        click.option("--dry-run", "dry_run", is_flag=True, hidden=True),
+        click.option("--target", multiple=True, hidden=True),
+        click.option("--non-interactive", "non_interactive", is_flag=True, hidden=True),
+        click.option("--encrypt", is_flag=True, hidden=True),
+        click.option("--system", is_flag=True, hidden=True),
+    ):
+        function = option(function)
+    return function
+
+
+@click.group(
+    name="dfm",
+    invoke_without_command=False,
+    context_settings={"help_option_names": ["-h", "--help"]},
+)
+@_root_click_options
+@click.pass_context
+def click_app(ctx, **options):
+    """dfm: manage dotfiles and safely reuse configuration across systems.
+
+    Common workflow:
+
+    \b
+    Use ``add`` to track a file, then ``install`` to create its link;
+    use ``share`` to link a saved object elsewhere, and ``view`` to inspect the view.
+    Use ``doctor`` to check the configuration, ``rm`` to remove managed objects, and
+    ``setup`` to prepare Windows for symbolic links.
+
+    Key usage examples:
+
+    \b
+    dfm add ~/.zshrc
+    dfm install
+    dfm add --system ~/.config/app/settings.toml
+    dfm share <SAVE_PATH> <INSTALL_PATH>
+
+    Run ``dfm <COMMAND> --help`` for details about a command's arguments.
+    """
+    ctx.ensure_object(dict)["root_options"] = options
+
+
+@click_app.command(context_settings={"help_option_names": ["-h", "--help"]})
+@click.option(
+    "--force", is_flag=True, help="Force replacement when the target conflicts."
+)
+@click.option(
+    "--dry-run", "dry_run", is_flag=True, help="Show the plan without changing files."
+)
+@click.option(
+    "--target",
+    multiple=True,
+    metavar="SYSTEM=PATH",
+    help="Set an install target for a system; may be repeated.",
+)
+@click.option(
+    "--non-interactive",
+    "non_interactive",
+    is_flag=True,
+    help="Skip the interactive wizard; useful for scripts.",
+)
+@click.option(
+    "--encrypt", is_flag=True, help="Encrypt the saved content when supported."
+)
+@click.option(
+    "--system",
+    is_flag=True,
+    help="Save for the current system without cross-system targets.",
+)
+@click.argument("install_path", metavar="INSTALL_PATH")
+@click.pass_context
+def add(ctx, install_path, **options):
+    """Track an install path and save it as a dotfile object.
+
+    INSTALL_PATH is an existing file or directory to track. By default, dfm opens
+    the interactive target selector; use --non-interactive and --target in scripts.
+    """
+    return _run_click_command(ctx, "add", install_path=install_path, **options)
+
+
+@click_app.command(name="rm", context_settings={"help_option_names": ["-h", "--help"]})
+@click.option(
+    "--all",
+    "all",
+    is_flag=True,
+    help="Remove all registered systems, not just the current system.",
+)
+@click.option(
+    "--force", is_flag=True, help="Force handling of conflicting install paths."
+)
+@click.option(
+    "--dry-run", "dry_run", is_flag=True, help="Show the plan without changing files."
+)
+@click.argument("path", metavar="PATH")
+@click.pass_context
+def remove(ctx, path, **options):
+    """Remove the saved object for PATH and its install link on the current system.
+
+    PATH may be an install path or a saved path. By default only the current system
+    is handled; --all handles every registered system. Use --dry-run to preview.
+    """
+    return _run_click_command(ctx, "rm", path=path, **options)
+
+
+@click_app.command(context_settings={"help_option_names": ["-h", "--help"]})
+@click.option(
+    "--force", is_flag=True, help="Force replacement of existing install links."
+)
+@click.option(
+    "--dry-run", "dry_run", is_flag=True, help="Show the plan without changing files."
+)
+@click.argument("save_path", metavar="SAVE_PATH", required=False)
+@click.pass_context
+def install(ctx, save_path, **options):
+    """Create install links from saved objects.
+
+    SAVE_PATH is optional; omit it to install every configured object, or provide
+    one to install only that object.
+    """
+    return _run_click_command(ctx, "install", save_path=save_path, **options)
+
+
+@click_app.command(context_settings={"help_option_names": ["-h", "--help"]})
+@click.option(
+    "--force", is_flag=True, help="Force replacement when the target conflicts."
+)
+@click.option(
+    "--dry-run", "dry_run", is_flag=True, help="Show the plan without changing files."
+)
+@click.option(
+    "--target",
+    multiple=True,
+    metavar="SYSTEM=PATH",
+    help="Set an install target for a system; may be repeated.",
+)
+@click.option(
+    "--non-interactive",
+    "non_interactive",
+    is_flag=True,
+    help="Skip the interactive wizard; useful for scripts.",
+)
+@click.argument("save_path", metavar="SAVE_PATH")
+@click.argument("install_path", metavar="INSTALL_PATH")
+@click.pass_context
+def share(ctx, save_path, install_path, **options):
+    """Link a saved object to a new install location.
+
+    SAVE_PATH is the saved object and INSTALL_PATH is the target location. For
+    non-interactive use, provide --non-interactive and one or more --target values.
+    """
+    return _run_click_command(
+        ctx, "share", save_path=save_path, install_path=install_path, **options
+    )
+
+
+@click_app.command(context_settings={"help_option_names": ["-h", "--help"]})
+@click.option("--dry-run", "dry_run", is_flag=True)
+@click.pass_context
+def view(ctx, **options):
+    """Rebuild and inspect the dotfiles view from the configuration."""
+    return _run_click_command(ctx, "view", **options)
+
+
+@click_app.command(context_settings={"help_option_names": ["-h", "--help"]})
+@click.pass_context
+def doctor(ctx):
+    """Check the configuration, saved objects, and install links for consistency."""
+    return _run_click_command(ctx, "doctor")
+
+
+@click_app.command(context_settings={"help_option_names": ["-h", "--help"]})
+@click.pass_context
+def setup(ctx):
+    """Enable the Windows developer setting required for symbolic links."""
+    return _run_click_command(ctx, "setup")
+
+
+def _run_parsed_command(args):
+    """Run a complete command from the normalized argument mapping."""
     if args.get("setup"):
         result = windows.setup_developer_mode()
         print(result.message)

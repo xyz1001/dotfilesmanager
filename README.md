@@ -40,6 +40,28 @@ pip install dotfilesmanager
 
 ---
 
+## ⌨️ Shell 自动补全
+
+Click 的补全功能只负责生成补全脚本，不会自动安装或启用它。请按所用的
+Shell 将脚本保存到相应位置，或直接输出后手动加载：
+
+```bash
+# Bash：bash-completion 常用目录（也可 source 到当前 Shell）
+_DFM_COMPLETE=bash_source dfm > ~/.local/share/bash-completion/completions/dfm
+
+# Zsh：补全函数目录
+_DFM_COMPLETE=zsh_source dfm > ~/.zfunc/_dfm
+
+# Fish：补全脚本目录
+_DFM_COMPLETE=fish_source dfm > ~/.config/fish/completions/dfm.fish
+```
+
+首次使用前请自行创建上述目录，并根据 Shell 配置加载脚本：Bash 可执行
+`source` 或重载 bash-completion，Zsh 将 `~/.zfunc` 加入 `fpath` 后运行
+`compinit`，Fish 则从其 completions 目录加载。补全不会因此自动启用。
+
+---
+
 ## 🏁 快速上手
 
 ### 🛠️ 场景一：将一个本地配置加入纳管

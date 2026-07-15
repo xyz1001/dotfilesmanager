@@ -4,6 +4,7 @@ from types import SimpleNamespace
 from unittest.mock import ANY, Mock
 
 import pytest
+from click.testing import CliRunner
 
 from dotfilesmanager import cli, operations
 
@@ -53,14 +54,11 @@ def test_command_reports_invalid_utf8_config_without_traceback(
     root.mkdir()
     (root / "dfm.yaml").write_bytes(b"\xff")
     monkeypatch.setattr(
-        cli, "docopt", Mock(return_value=_args("view", **{"--dry-run": True}))
-    )
-    monkeypatch.setattr(
         cli.config, "default_dotfiles_root", Mock(return_value=str(root))
     )
 
     with pytest.raises(SystemExit):
-        cli.main()
+        cli._run_parsed_command(_args("view", **{"--dry-run": True}))
 
     output = capsys.readouterr().out
     assert "Invalid configuration: invalid dfm.yaml encoding; expected UTF-8" in output
@@ -70,20 +68,6 @@ def test_command_reports_invalid_utf8_config_without_traceback(
 def test_main_dispatches_add_saves_then_rebuilds_view_and_renders(monkeypatch, capsys):
     result = operations.OperationResult({"dotfiles": {SAVED_KEY: {}}}, ["added"])
     monkeypatch.setattr(cli.operations, "os_name", lambda: "linux")
-    monkeypatch.setattr(
-        cli,
-        "docopt",
-        Mock(
-            return_value=_args(
-                "add",
-                **{
-                    "<install_path>": "~/item",
-                    "--system": True,
-                    "--encrypt": True,
-                },
-            )
-        ),
-    )
     monkeypatch.setattr(cli.config, "default_dotfiles_root", Mock(return_value="/repo"))
     monkeypatch.setattr(cli.config, "load_config", Mock(return_value={"dotfiles": {}}))
     normalize = Mock(return_value="/home/item")
@@ -104,7 +88,12 @@ def test_main_dispatches_add_saves_then_rebuilds_view_and_renders(monkeypatch, c
     )
     monkeypatch.setattr(cli.operations, "view", view)
 
-    cli.main()
+    cli._run_parsed_command(
+        _args(
+            "add",
+            **{"<install_path>": "~/item", "--system": True, "--encrypt": True},
+        )
+    )
 
     add.assert_called_once_with(
         "/home/item", True, {"dotfiles": {}}, "/repo", {}, encrypt=True
@@ -119,13 +108,6 @@ def test_main_dispatches_add_saves_then_rebuilds_view_and_renders(monkeypatch, c
 def test_auto_view_failure_keeps_saved_config_and_reports_repair(monkeypatch):
     result = operations.OperationResult({"dotfiles": {SAVED_KEY: {}}}, ["added"])
     monkeypatch.setattr(cli.operations, "os_name", lambda: "linux")
-    monkeypatch.setattr(
-        cli,
-        "docopt",
-        Mock(
-            return_value=_args("add", **{"<install_path>": "~/item", "--system": True})
-        ),
-    )
     monkeypatch.setattr(cli.config, "default_dotfiles_root", Mock(return_value="/repo"))
     monkeypatch.setattr(cli.config, "load_config", Mock(return_value={"dotfiles": {}}))
     monkeypatch.setattr(
@@ -143,7 +125,9 @@ def test_auto_view_failure_keeps_saved_config_and_reports_repair(monkeypatch):
     monkeypatch.setattr(cli.operations, "view", view)
 
     with pytest.raises(RuntimeError, match="configuration was saved") as error:
-        cli.main()
+        cli._run_parsed_command(
+            _args("add", **{"<install_path>": "~/item", "--system": True})
+        )
 
     save.assert_called_once_with("/repo", result.config)
     view.assert_called_once_with(result.config, "/repo", force=True)
@@ -154,13 +138,6 @@ def test_auto_view_failure_keeps_saved_config_and_reports_repair(monkeypatch):
 def test_auto_view_root_validation_failure_keeps_saved_config(monkeypatch):
     result = operations.OperationResult({"dotfiles": {SAVED_KEY: {}}}, [])
     monkeypatch.setattr(cli.operations, "os_name", lambda: "linux")
-    monkeypatch.setattr(
-        cli,
-        "docopt",
-        Mock(
-            return_value=_args("add", **{"<install_path>": "~/item", "--system": True})
-        ),
-    )
     monkeypatch.setattr(cli.config, "default_dotfiles_root", Mock(return_value="/repo"))
     monkeypatch.setattr(cli.config, "load_config", Mock(return_value={"dotfiles": {}}))
     monkeypatch.setattr(
@@ -176,7 +153,9 @@ def test_auto_view_root_validation_failure_keeps_saved_config(monkeypatch):
     monkeypatch.setattr(cli.operations, "view", view)
 
     with pytest.raises(RuntimeError, match="configuration was saved") as error:
-        cli.main()
+        cli._run_parsed_command(
+            _args("add", **{"<install_path>": "~/item", "--system": True})
+        )
 
     save.assert_called_once_with("/repo", result.config)
     mutation_root.assert_called_once_with("/repo")
@@ -187,13 +166,6 @@ def test_auto_view_root_validation_failure_keeps_saved_config(monkeypatch):
 def test_auto_view_privilege_error_uses_setup_guidance(monkeypatch, capsys):
     result = operations.OperationResult({"dotfiles": {SAVED_KEY: {}}}, [])
     monkeypatch.setattr(cli.operations, "os_name", lambda: "windows")
-    monkeypatch.setattr(
-        cli,
-        "docopt",
-        Mock(
-            return_value=_args("add", **{"<install_path>": "~/item", "--system": True})
-        ),
-    )
     monkeypatch.setattr(cli.config, "default_dotfiles_root", Mock(return_value="/repo"))
     monkeypatch.setattr(cli.config, "load_config", Mock(return_value={"dotfiles": {}}))
     monkeypatch.setattr(
@@ -208,6 +180,7 @@ def test_auto_view_privilege_error_uses_setup_guidance(monkeypatch, capsys):
     monkeypatch.setattr(
         cli.operations, "view", Mock(side_effect=cli.windows.SymlinkPrivilegeError())
     )
+    monkeypatch.setattr(cli.sys, "argv", ["dfm", "add", "~/item", "--system"])
 
     with pytest.raises(SystemExit):
         cli.main()
@@ -217,15 +190,6 @@ def test_auto_view_privilege_error_uses_setup_guidance(monkeypatch, capsys):
 
 def test_main_exits_on_validation_failure_without_saving(monkeypatch, capsys):
     monkeypatch.setattr(cli.operations, "os_name", lambda: "linux")
-    monkeypatch.setattr(
-        cli,
-        "docopt",
-        Mock(
-            return_value=_args(
-                "add", **{"<install_path>": "bad", "--non-interactive": True}
-            )
-        ),
-    )
     monkeypatch.setattr(cli.config, "default_dotfiles_root", Mock(return_value="/repo"))
     monkeypatch.setattr(cli.config, "load_config", Mock(return_value={"dotfiles": {}}))
     monkeypatch.setattr(cli.operations, "normalize_path", Mock(return_value="/bad"))
@@ -236,7 +200,9 @@ def test_main_exits_on_validation_failure_without_saving(monkeypatch, capsys):
     monkeypatch.setattr(cli.config, "save_config", save)
 
     with pytest.raises(SystemExit) as error:
-        cli.main()
+        cli._run_parsed_command(
+            _args("add", **{"<install_path>": "bad", "--non-interactive": True})
+        )
 
     assert error.value.code == -1
     assert capsys.readouterr().out == "invalid path\n"
@@ -254,7 +220,6 @@ def test_non_tty_target_commands_require_noninteractive_without_reading_stdin(
     monkeypatch, command, values
 ):
     monkeypatch.setattr(cli.operations, "os_name", lambda: "linux")
-    monkeypatch.setattr(cli, "docopt", Mock(return_value=_args(command, **values)))
     load = Mock()
     monkeypatch.setattr(cli.config, "load_config", load)
     monkeypatch.setattr(cli.sys, "stdin", SimpleNamespace(isatty=lambda: False))
@@ -264,7 +229,7 @@ def test_non_tty_target_commands_require_noninteractive_without_reading_stdin(
     monkeypatch.setattr(cli, "_prompt_targets", target_prompt)
 
     with pytest.raises(SystemExit):
-        cli.main()
+        cli._run_parsed_command(_args(command, **values))
 
     load.assert_not_called()
     prompt.assert_not_called()
@@ -455,25 +420,6 @@ def test_prompt_adapter_converts_terminal_cancellation_to_none(monkeypatch, erro
     assert cli._prompt_targets([]) is None
 
 
-def test_docopt_parses_repeated_targets():
-    args = cli.docopt(
-        cli.USAGE,
-        argv=[
-            "add",
-            "~/item",
-            "--non-interactive",
-            "--target=darwin=~/a",
-            "--target=windows=~/b",
-        ],
-    )
-    assert args["--target"] == ["darwin=~/a", "windows=~/b"]
-
-
-def test_docopt_parses_rm_all():
-    args = cli.docopt(cli.USAGE, argv=["rm", "~/item", "--all"])
-    assert args["--all"] is True
-
-
 def test_remove_selector_lists_registered_systems_and_defaults_current(monkeypatch):
     monkeypatch.setattr(cli.operations, "os_name", lambda: "linux")
     monkeypatch.setattr(cli.sys, "stdin", SimpleNamespace(isatty=lambda: True))
@@ -609,11 +555,6 @@ def test_remove_foreign_selection_skips_current_preflight(monkeypatch, dry_run):
         "dotfiles": {SAVED_KEY: {"linux": {"path": "/install"}, "custom": {}}}
     }
     monkeypatch.setattr(cli.operations, "os_name", lambda: "linux")
-    monkeypatch.setattr(
-        cli,
-        "docopt",
-        Mock(return_value=_args("rm", **{"<path>": "path", "--dry-run": dry_run})),
-    )
     monkeypatch.setattr(cli.config, "default_dotfiles_root", Mock(return_value="/repo"))
     monkeypatch.setattr(cli.config, "load_config", Mock(return_value=dotfiles_config))
     monkeypatch.setattr(cli.operations, "validate_config", Mock(return_value=[]))
@@ -638,7 +579,7 @@ def test_remove_foreign_selection_skips_current_preflight(monkeypatch, dry_run):
         Mock(return_value=operations.OperationResult(result.config)),
     )
 
-    cli.main()
+    cli._run_parsed_command(_args("rm", **{"<path>": "path", "--dry-run": dry_run}))
 
     destination.assert_not_called()
     paths.assert_called_once_with([], "/repo")
@@ -655,15 +596,6 @@ def test_remove_all_with_only_foreign_registration_validates_saved_path(
     result = operations.OperationResult({"dotfiles": {}}, [])
     dotfiles_config = {"dotfiles": {SAVED_KEY: {"darwin": {}}}}
     monkeypatch.setattr(cli.operations, "os_name", lambda: "linux")
-    monkeypatch.setattr(
-        cli,
-        "docopt",
-        Mock(
-            return_value=_args(
-                "rm", **{"<path>": "path", "--all": True, "--dry-run": dry_run}
-            )
-        ),
-    )
     monkeypatch.setattr(cli.config, "default_dotfiles_root", Mock(return_value="/repo"))
     monkeypatch.setattr(cli.config, "load_config", Mock(return_value=dotfiles_config))
     monkeypatch.setattr(cli.operations, "validate_config", Mock(return_value=[]))
@@ -686,7 +618,9 @@ def test_remove_all_with_only_foreign_registration_validates_saved_path(
         Mock(return_value=operations.OperationResult(result.config)),
     )
 
-    cli.main()
+    cli._run_parsed_command(
+        _args("rm", **{"<path>": "path", "--all": True, "--dry-run": dry_run})
+    )
 
     paths.assert_called_once_with([f"/repo/{SAVED_KEY}"], "/repo")
     if dry_run:
@@ -718,7 +652,6 @@ def test_main_dispatches_remaining_commands_and_saves(
     result = operations.OperationResult({"dotfiles": {SAVED_KEY: {}}}, ["changed"])
     dotfiles_config = {"dotfiles": {}}
     monkeypatch.setattr(cli.operations, "os_name", lambda: "linux")
-    monkeypatch.setattr(cli, "docopt", Mock(return_value=_args(command, **values)))
     monkeypatch.setattr(cli.config, "default_dotfiles_root", Mock(return_value="/repo"))
     monkeypatch.setattr(cli.config, "load_config", Mock(return_value=dotfiles_config))
     monkeypatch.setattr(
@@ -750,7 +683,7 @@ def test_main_dispatches_remaining_commands_and_saves(
     view = Mock(return_value=operations.OperationResult(result.config, ["viewed"]))
     monkeypatch.setattr(cli.operations, "view", view)
 
-    cli.main()
+    cli._run_parsed_command(_args(command, **values))
 
     operation, paths = expected
     if operation == "remove":
@@ -803,18 +736,39 @@ def test_confirm_replace_only_accepts_y(monkeypatch, answer, expected):
 
 def test_main_dispatches_on_windows_without_administrator_gate(monkeypatch):
     monkeypatch.setattr(cli.operations, "os_name", lambda: "windows")
-    monkeypatch.setattr(cli, "docopt", Mock(return_value=_args("doctor")))
     monkeypatch.setattr(cli.config, "default_dotfiles_root", Mock(return_value="/repo"))
     doctor = Mock()
     monkeypatch.setattr(cli, "_doctor", doctor)
 
-    cli.main()
+    assert cli._run_parsed_command(_args("doctor")) is None
 
     doctor.assert_called_once_with("/repo")
 
 
+def test_main_successfully_returns_without_system_exit(monkeypatch):
+    monkeypatch.setattr(cli.sys, "argv", ["dfm", "doctor"])
+    monkeypatch.setattr(cli.config, "default_dotfiles_root", Mock(return_value="/repo"))
+    doctor = Mock()
+    monkeypatch.setattr(cli, "_doctor", doctor)
+
+    assert cli.main() is None
+    doctor.assert_called_once_with("/repo")
+
+
+def test_main_click_parser_error_is_stderr_exit_two(monkeypatch, capsys):
+    monkeypatch.setattr(cli.sys, "argv", ["dfm", "not-a-command"])
+
+    with pytest.raises(SystemExit) as error:
+        cli.main()
+
+    captured = capsys.readouterr()
+    assert error.value.code == 2
+    assert "Error:" in captured.err
+    assert captured.out == ""
+
+
 def test_only_symlink_privilege_error_gets_setup_guidance(monkeypatch, capsys):
-    monkeypatch.setattr(cli, "docopt", Mock(return_value=_args("doctor")))
+    monkeypatch.setattr(cli.sys, "argv", ["dfm", "doctor"])
     monkeypatch.setattr(cli.config, "default_dotfiles_root", Mock(return_value="/repo"))
     monkeypatch.setattr(
         cli, "_doctor", Mock(side_effect=cli.windows.SymlinkPrivilegeError())
@@ -829,7 +783,7 @@ def test_only_symlink_privilege_error_gets_setup_guidance(monkeypatch, capsys):
 
 
 def test_unrelated_symlink_error_remains_native(monkeypatch, capsys):
-    monkeypatch.setattr(cli, "docopt", Mock(return_value=_args("doctor")))
+    monkeypatch.setattr(cli.sys, "argv", ["dfm", "doctor"])
     monkeypatch.setattr(cli.config, "default_dotfiles_root", Mock(return_value="/repo"))
     monkeypatch.setattr(cli, "_doctor", Mock(side_effect=OSError("disk failure")))
 
@@ -842,7 +796,6 @@ def test_unrelated_symlink_error_remains_native(monkeypatch, capsys):
 def test_view_dispatches_without_saving_configuration(monkeypatch):
     result = operations.OperationResult({"dotfiles": {SAVED_KEY: {}}}, ["viewed"])
     monkeypatch.setattr(cli.operations, "os_name", lambda: "linux")
-    monkeypatch.setattr(cli, "docopt", Mock(return_value=_args("view")))
     monkeypatch.setattr(cli.config, "default_dotfiles_root", Mock(return_value="/repo"))
     dotfiles_config = {"dotfiles": {}}
     monkeypatch.setattr(cli.config, "load_config", Mock(return_value=dotfiles_config))
@@ -853,7 +806,331 @@ def test_view_dispatches_without_saving_configuration(monkeypatch):
     save = Mock()
     monkeypatch.setattr(cli.config, "save_config", save)
 
-    cli.main()
+    cli._run_parsed_command(_args("view"))
 
     view.assert_called_once_with(dotfiles_config, "/repo", force=True)
     save.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    ("command", "arguments", "positionals"),
+    [
+        ("add", ["item"], {"<install_path>": "item"}),
+        ("rm", ["item"], {"<path>": "item"}),
+        ("install", [], {"<save_path>": None}),
+        (
+            "share",
+            ["saved", "item"],
+            {"<save_path>": "saved", "<install_path>": "item"},
+        ),
+        ("view", [], {}),
+        ("doctor", [], {}),
+        ("setup", [], {}),
+    ],
+)
+def test_click_app_builds_complete_normalized_mapping(
+    monkeypatch, command, arguments, positionals
+):
+    seen = []
+    monkeypatch.setattr(cli, "_run_parsed_command", seen.append)
+
+    result = CliRunner().invoke(cli.click_app, [command, *arguments])
+
+    assert result.exit_code == 0
+    args = seen[0]
+    assert args[command] is True
+    assert all(
+        args[name] is False
+        for name in ("add", "rm", "install", "share", "view", "doctor", "setup")
+        if name != command
+    )
+    assert args["--target"] == []
+    assert all(
+        args[name] is False
+        for name in (
+            "--system",
+            "--encrypt",
+            "--non-interactive",
+            "--dry-run",
+            "--force",
+            "--all",
+        )
+    )
+    for name, value in {
+        "<install_path>": None,
+        "<save_path>": None,
+        "<path>": None,
+        **positionals,
+    }.items():
+        assert args[name] == value
+
+
+def test_click_target_forms_are_ordered_and_root_options_merge(monkeypatch):
+    seen = []
+    monkeypatch.setattr(cli, "_run_parsed_command", seen.append)
+
+    result = CliRunner().invoke(
+        cli.click_app,
+        [
+            "--target=first=~/one",
+            "--non-interactive",
+            "share",
+            "saved",
+            "item",
+            "--target",
+            "second=~/two",
+            "--dry-run",
+        ],
+    )
+
+    assert result.exit_code == 0
+    assert seen[0]["--target"] == ["first=~/one", "second=~/two"]
+    assert seen[0]["--non-interactive"] is True
+    assert seen[0]["--dry-run"] is True
+
+
+@pytest.mark.parametrize(
+    "arguments",
+    [
+        ["--force", "view"],
+        ["--all", "add", "item"],
+        ["--system", "install"],
+        ["--target=x=y", "view"],
+        ["--encrypt", "share", "saved", "item"],
+        ["--non-interactive", "install"],
+        ["--dry-run", "doctor"],
+    ],
+)
+def test_click_rejects_inapplicable_root_options(arguments):
+    result = CliRunner(mix_stderr=False).invoke(cli.click_app, arguments)
+
+    assert result.exit_code == 2
+    assert "Error:" in result.stderr
+
+
+@pytest.mark.parametrize(
+    "arguments", [["--help"], ["-h"], ["view", "--help"], ["add", "-h"]]
+)
+def test_click_root_and_command_help(arguments):
+    result = CliRunner().invoke(cli.click_app, arguments)
+
+    assert result.exit_code == 0
+    assert "Usage:" in result.output
+
+
+def test_click_root_help_contract_describes_workflow_and_commands():
+    result = CliRunner().invoke(cli.click_app, ["--help"])
+
+    assert result.exit_code == 0
+    assert "manage dotfiles" in result.output
+    assert "Common workflow:" in result.output
+    output_lines = result.output.splitlines()
+    for example in (
+        "dfm add ~/.zshrc",
+        "dfm install",
+        "dfm add --system ~/.config/app/settings.toml",
+        "dfm share <SAVE_PATH> <INSTALL_PATH>",
+    ):
+        assert output_lines.count(f"  {example}") == 1
+    for command in ("add", "install", "share", "rm", "view", "doctor", "setup"):
+        assert command in result.output
+    # Compatibility options remain accepted at the root, but are not listed as options.
+    assert "Options:\n  -h, --help" in result.output
+
+
+@pytest.mark.parametrize(
+    ("command", "required_text", "options"),
+    [
+        (
+            "add",
+            "INSTALL_PATH",
+            (
+                "--system",
+                "--encrypt",
+                "--non-interactive",
+                "--target",
+                "--dry-run",
+                "--force",
+            ),
+        ),
+        ("install", "SAVE_PATH", ("--dry-run", "--force")),
+        (
+            "share",
+            "SAVE_PATH INSTALL_PATH",
+            ("--non-interactive", "--target", "--dry-run", "--force"),
+        ),
+        ("rm", "PATH", ("--all", "--dry-run", "--force")),
+    ],
+)
+def test_click_command_help_contract(command, required_text, options):
+    result = CliRunner().invoke(cli.click_app, [command, "--help"])
+
+    assert result.exit_code == 0
+    assert required_text in result.output
+    for option in options:
+        assert option in result.output
+
+
+@pytest.mark.parametrize(
+    "arguments",
+    [
+        ["unknown"],
+        ["rm"],
+        ["add"],
+        ["share", "saved"],
+        ["view", "--force"],
+        ["view", "extra"],
+    ],
+)
+def test_click_parser_errors_use_stderr_and_exit_two(arguments):
+    result = CliRunner(mix_stderr=False).invoke(cli.click_app, arguments)
+
+    assert result.exit_code == 2
+    assert "Error:" in result.stderr
+
+
+@pytest.mark.parametrize("shell", ["bash", "zsh", "fish"])
+def test_click_shell_completion_sources_are_parser_only(monkeypatch, shell):
+    runner = Mock(side_effect=AssertionError("completion must not run a command"))
+    load_config = Mock(side_effect=AssertionError("completion must not load config"))
+    monkeypatch.setattr(cli, "_run_parsed_command", runner)
+    monkeypatch.setattr(cli.config, "load_config", load_config)
+
+    result = CliRunner().invoke(
+        cli.click_app,
+        [],
+        prog_name="dfm",
+        env={"_DFM_COMPLETE": f"{shell}_source"},
+    )
+
+    assert result.exit_code == 0
+    assert result.output
+    runner.assert_not_called()
+    load_config.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    ("option", "command", "arguments", "expected"),
+    [
+        ("system", "add", ["item"], {"--system": True}),
+        ("encrypt", "add", ["item"], {"--encrypt": True}),
+        ("non-interactive", "add", ["item"], {"--non-interactive": True}),
+        ("non-interactive", "share", ["saved", "item"], {"--non-interactive": True}),
+        ("dry-run", "add", ["item"], {"--dry-run": True}),
+        ("dry-run", "rm", ["item"], {"--dry-run": True}),
+        ("dry-run", "install", [], {"--dry-run": True}),
+        ("dry-run", "share", ["saved", "item"], {"--dry-run": True}),
+        ("dry-run", "view", [], {"--dry-run": True}),
+        ("force", "add", ["item"], {"--force": True}),
+        ("force", "rm", ["item"], {"--force": True}),
+        ("force", "install", ["saved"], {"--force": True}),
+        ("force", "share", ["saved", "item"], {"--force": True}),
+        ("all", "rm", ["item"], {"--all": True}),
+    ],
+)
+@pytest.mark.parametrize("placement", ["local_before", "local_after", "root"])
+def test_click_supported_options_map_from_both_positions(
+    monkeypatch, option, command, arguments, expected, placement
+):
+    seen = []
+    monkeypatch.setattr(cli, "_run_parsed_command", seen.append)
+    option_token = "--" + option
+    if placement == "local_before":
+        argv = [command, option_token, *arguments]
+    elif placement == "local_after":
+        argv = [command, *arguments, option_token]
+    else:
+        argv = [option_token, command, *arguments]
+
+    result = CliRunner().invoke(cli.click_app, argv)
+
+    assert result.exit_code == 0
+    for key, value in expected.items():
+        assert seen[0][key] is value
+
+
+@pytest.mark.parametrize("command", ["add", "share"])
+def test_click_target_forms_and_ordered_repetition_for_each_target_command(
+    monkeypatch, command
+):
+    seen = []
+    monkeypatch.setattr(cli, "_run_parsed_command", seen.append)
+    arguments = ["item"] if command == "add" else ["saved", "item"]
+    result = CliRunner().invoke(
+        cli.click_app,
+        [
+            "--target=first=~/one",
+            "--non-interactive",
+            command,
+            *arguments,
+            "--target",
+            "second=~/two",
+            "--target=third=~/three",
+        ],
+    )
+
+    assert result.exit_code == 0
+    assert seen[0]["--target"] == [
+        "first=~/one",
+        "second=~/two",
+        "third=~/three",
+    ]
+
+
+@pytest.mark.parametrize(
+    ("command", "positionals", "argv"),
+    [
+        (
+            "add",
+            {"<install_path>": "item"},
+            ["--target=root=~/root", "add", "item", "--target=local-after=~/after"],
+        ),
+        (
+            "add",
+            {"<install_path>": "item"},
+            ["add", "--target", "local-before=~/before", "item"],
+        ),
+        (
+            "share",
+            {"<save_path>": "saved", "<install_path>": "item"},
+            [
+                "--target=root=~/root",
+                "share",
+                "saved",
+                "--target",
+                "local-before=~/before",
+                "item",
+            ],
+        ),
+        (
+            "share",
+            {"<save_path>": "saved", "<install_path>": "item"},
+            ["share", "saved", "item", "--target=local-after=~/after"],
+        ),
+    ],
+)
+def test_click_target_position_contracts_preserve_mapping_order(
+    monkeypatch, command, positionals, argv
+):
+    seen = []
+    monkeypatch.setattr(cli, "_run_parsed_command", seen.append)
+
+    result = CliRunner().invoke(cli.click_app, argv)
+
+    assert result.exit_code == 0
+    args = seen[0]
+    assert {key: args[key] for key in positionals} == positionals
+    if argv[0].startswith("--target="):
+        assert args["--target"][0] == "root=~/root"
+    assert args["--target"][-1].startswith("local-")
+
+
+def test_click_install_nonempty_optional_save_path_is_mapped(monkeypatch):
+    seen = []
+    monkeypatch.setattr(cli, "_run_parsed_command", seen.append)
+
+    result = CliRunner().invoke(cli.click_app, ["install", "saved-object"])
+
+    assert result.exit_code == 0
+    assert seen[0]["install"] is True
+    assert seen[0]["<save_path>"] == "saved-object"
