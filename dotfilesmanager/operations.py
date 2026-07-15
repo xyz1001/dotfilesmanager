@@ -1167,7 +1167,10 @@ def install(abs_save_path, config, dotfiles_root, confirm_replace, accepted=None
             continue
         if accepted is not None and state != accepted[item_rel_save_path]:
             raise ValueError("install path changed after install preflight")
-        if not os.path.lexists(item_install_path) or confirm_replace(item_install_path):
+        # A broken destination symlink cannot provide a usable existing object,
+        # so replace it without asking.  Other conflicts retain confirmation
+        # semantics, including valid symlinks pointing at the wrong object.
+        if state in ("missing", "dangling") or confirm_replace(item_install_path):
             approved.append((item_rel_save_path, item_abs_save_path, item_install_path))
     messages = []
     for item_rel_save_path, item_abs_save_path, item_install_path in approved:
@@ -1183,6 +1186,8 @@ def _link_state(target, link):
         return "missing"
     if not os.path.islink(link):
         return "conflict"
+    if not os.path.exists(link):
+        return "dangling"
     actual = os.readlink(link)
     module = ntpath if os_name() == "windows" else os.path
     if not module.isabs(actual):

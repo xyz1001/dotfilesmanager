@@ -457,8 +457,8 @@ def test_install_skips_other_systems_and_reports_unknown_item(tmp_path, monkeypa
     assert unknown.messages == ["files/missing is not kept in dotfiles"]
 
 
-@pytest.mark.parametrize("existing", ["file", "directory", "dangling-link"])
-def test_install_replaces_file_directory_or_dangling_link_only_when_confirmed(
+@pytest.mark.parametrize("existing", ["file", "directory"])
+def test_install_replaces_file_or_directory_only_when_confirmed(
     tmp_path, monkeypatch, existing
 ):
     repo = tmp_path / "repo"
@@ -473,8 +473,6 @@ def test_install_replaces_file_directory_or_dangling_link_only_when_confirmed(
     elif existing == "directory":
         install_path.mkdir()
         (install_path / "child").write_text("existing")
-    else:
-        install_path.symlink_to(tmp_path / "missing")
     config = _config(f"files/{HASH}/saved", install_path)
     monkeypatch.setattr(operations, "os_name", lambda: "linux")
 
@@ -487,14 +485,38 @@ def test_install_replaces_file_directory_or_dangling_link_only_when_confirmed(
     elif existing == "directory":
         assert not install_path.is_symlink()
         assert (install_path / "child").read_text() == "existing"
-    else:
-        assert install_path.is_symlink()
-        assert os.readlink(install_path) == str(tmp_path / "missing")
 
     installed = operations.install(str(saved), config, str(repo), lambda _: True)
     assert install_path.is_symlink()
     assert os.readlink(install_path) == str(saved)
     assert installed.messages == [f"Install files/{HASH}/saved -> {install_path}"]
+
+
+def test_install_replaces_dangling_destination_without_confirmation(
+    tmp_path, monkeypatch
+):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    saved = repo / "files" / HASH / "saved"
+    saved.parent.mkdir(parents=True)
+    saved.write_text("saved")
+    install_path = tmp_path / "home" / "target"
+    install_path.parent.mkdir()
+    missing = tmp_path / "missing"
+    install_path.symlink_to(missing)
+    config = _config(f"files/{HASH}/saved", install_path)
+    monkeypatch.setattr(operations, "os_name", lambda: "linux")
+
+    result = operations.install(
+        str(saved),
+        config,
+        str(repo),
+        lambda _: pytest.fail("dangling destination must not request confirmation"),
+    )
+
+    assert install_path.is_symlink()
+    assert os.readlink(install_path) == str(saved)
+    assert result.messages == [f"Install files/{HASH}/saved -> {install_path}"]
 
 
 @pytest.mark.parametrize("relative", [False, True])
