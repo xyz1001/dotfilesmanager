@@ -4,6 +4,7 @@ import ctypes
 import os
 import tempfile
 from dataclasses import dataclass
+from typing import Any
 
 ERROR_PRIVILEGE_NOT_HELD = 1314
 _KEY_PATH = r"SOFTWARE\Microsoft\Windows\CurrentVersion\AppModelUnlock"
@@ -20,11 +21,13 @@ class SymlinkPrivilegeError(OSError):
     """A symlink failed solely because Windows withheld the privilege."""
 
 
-def is_privilege_not_held(error):
+def is_privilege_not_held(error: Any) -> bool:
     return getattr(error, "winerror", None) == ERROR_PRIVILEGE_NOT_HELD
 
 
-def create_symlink(target, link, *, target_is_directory=False):
+def create_symlink(
+    target: str, link: str, *, target_is_directory: bool = False
+) -> None:
     """Create a link and classify only Windows' Developer Mode failure."""
     try:
         os.symlink(target, link, target_is_directory=target_is_directory)
@@ -40,7 +43,7 @@ class SetupResult:
     message: str
 
 
-def _probe_symlinks():
+def _probe_symlinks() -> None:
     """Exercise both Windows link kinds rather than trusting a registry value."""
     with tempfile.TemporaryDirectory(prefix="dfm-symlink-") as directory:
         file_target = os.path.join(directory, "target-file")
@@ -57,27 +60,29 @@ def _probe_symlinks():
         )
 
 
-def _registry_value():
+def _registry_value() -> bool:
     import winreg
 
-    access = winreg.KEY_READ | winreg.KEY_WOW64_64KEY
+    registry: Any = winreg
+    access = registry.KEY_READ | registry.KEY_WOW64_64KEY
     try:
-        with winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, _KEY_PATH, 0, access) as key:
-            value, kind = winreg.QueryValueEx(key, _VALUE_NAME)
+        with registry.OpenKey(registry.HKEY_LOCAL_MACHINE, _KEY_PATH, 0, access) as key:
+            value, kind = registry.QueryValueEx(key, _VALUE_NAME)
     except FileNotFoundError:
         return False
-    return kind == winreg.REG_DWORD and value == 1
+    return kind == registry.REG_DWORD and value == 1
 
 
-def _set_registry_value():
+def _set_registry_value() -> None:
     import winreg
 
-    access = winreg.KEY_SET_VALUE | winreg.KEY_WOW64_64KEY
-    with winreg.CreateKeyEx(winreg.HKEY_LOCAL_MACHINE, _KEY_PATH, 0, access) as key:
-        winreg.SetValueEx(key, _VALUE_NAME, 0, winreg.REG_DWORD, 1)
+    registry: Any = winreg
+    access = registry.KEY_SET_VALUE | registry.KEY_WOW64_64KEY
+    with registry.CreateKeyEx(registry.HKEY_LOCAL_MACHINE, _KEY_PATH, 0, access) as key:
+        registry.SetValueEx(key, _VALUE_NAME, 0, registry.REG_DWORD, 1)
 
 
-def _is_elevated():
+def _is_elevated() -> bool:
     from ctypes import wintypes
 
     function = _win_dll("shell32").IsUserAnAdmin
@@ -86,11 +91,12 @@ def _is_elevated():
     return bool(function())
 
 
-def _win_dll(name):
-    return ctypes.WinDLL(name, use_last_error=True)
+def _win_dll(name: str) -> Any:
+    ctypes_module: Any = ctypes
+    return ctypes_module.WinDLL(name, use_last_error=True)
 
 
-def _system_reg_exe():
+def _system_reg_exe() -> str:
     """Use an absolute system path; never resolve a caller-controlled reg.exe."""
     buffer = ctypes.create_unicode_buffer(32768)
     from ctypes import wintypes
@@ -100,16 +106,19 @@ def _system_reg_exe():
     function.restype = wintypes.DWORD
     length = function(buffer, len(buffer))
     if not length or length >= len(buffer):
-        raise OSError(ctypes.get_last_error(), "GetSystemDirectoryW failed")
+        ctypes_module: Any = ctypes
+        raise OSError(ctypes_module.get_last_error(), "GetSystemDirectoryW failed")
     path = os.path.join(buffer.value, "reg.exe")
     if not os.path.isabs(path):  # Defensive: ShellExecute must never search PATH.
         raise OSError("GetSystemDirectoryW returned a non-absolute path")
     return path
 
 
-def _shell_execute_elevated(executable, arguments, directory):
+def _shell_execute_elevated(executable: str, arguments: str, directory: str) -> None:
     """Run an absolute command with UAC and wait for its real exit status."""
     from ctypes import wintypes
+
+    ctypes_module: Any = ctypes
 
     class SHELLEXECUTEINFOW(ctypes.Structure):
         _fields_ = [
@@ -143,7 +152,9 @@ def _shell_execute_elevated(executable, arguments, directory):
     shell_execute.argtypes = [ctypes.POINTER(SHELLEXECUTEINFOW)]
     shell_execute.restype = wintypes.BOOL
     if not shell_execute(ctypes.byref(info)):
-        raise OSError(ctypes.get_last_error(), "UAC elevation was cancelled or failed")
+        raise OSError(
+            ctypes_module.get_last_error(), "UAC elevation was cancelled or failed"
+        )
     kernel32 = _win_dll("kernel32")
     kernel32.WaitForSingleObject.argtypes = [wintypes.HANDLE, wintypes.DWORD]
     kernel32.WaitForSingleObject.restype = wintypes.DWORD
@@ -156,23 +167,25 @@ def _shell_execute_elevated(executable, arguments, directory):
     kernel32.CloseHandle.restype = wintypes.BOOL
     try:
         if kernel32.WaitForSingleObject(info.hProcess, _INFINITE) == _WAIT_FAILED:
-            raise OSError(ctypes.get_last_error(), "waiting for reg.exe failed")
+            raise OSError(ctypes_module.get_last_error(), "waiting for reg.exe failed")
         code = wintypes.DWORD()
         if not kernel32.GetExitCodeProcess(info.hProcess, ctypes.byref(code)):
-            raise OSError(ctypes.get_last_error(), "cannot read reg.exe exit code")
+            raise OSError(
+                ctypes_module.get_last_error(), "cannot read reg.exe exit code"
+            )
         if code.value != 0:
             raise OSError(f"reg.exe exited with status {code.value}")
     finally:
         kernel32.CloseHandle(info.hProcess)
 
 
-def _run_elevated_reg():
+def _run_elevated_reg() -> None:
     """Elevate only system reg.exe with the fixed 64-bit Developer Mode command."""
     executable = _system_reg_exe()
     _shell_execute_elevated(executable, _REG_ARGUMENTS, os.path.dirname(executable))
 
 
-def setup_developer_mode():
+def setup_developer_mode() -> SetupResult:
     """Enable Developer Mode only when an actual link probe needs it."""
     if os.name != "nt":
         return SetupResult(

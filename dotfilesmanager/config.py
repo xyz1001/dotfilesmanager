@@ -3,10 +3,12 @@
 import errno
 import os
 import tempfile
+from typing import Any, Dict, Optional
 
 import yaml
 
 from . import operations
+from ._types import RawConfig
 
 
 class _UniqueKeyLoader(yaml.SafeLoader):
@@ -33,19 +35,19 @@ _UniqueKeyLoader.add_constructor(
 )
 
 
-def default_dotfiles_root():
+def default_dotfiles_root() -> str:
     """Return the directory that stores managed dotfiles."""
     return os.path.join(os.path.expanduser("~"), "dotfiles")
 
 
-def load_config(dotfiles_root):
+def load_config(dotfiles_root: str) -> RawConfig:
     """Load the dotfile mapping, initializing it when no config exists."""
     config_path = os.path.join(dotfiles_root, "dfm.yaml")
     if not os.path.isfile(config_path):
         return {"dotfiles": {}}
     try:
         with open(config_path, encoding="utf-8") as config_file:
-            config = yaml.load(config_file, Loader=_UniqueKeyLoader)
+            config: Any = yaml.load(config_file, Loader=_UniqueKeyLoader)
     except yaml.YAMLError as error:
         raise ValueError("invalid dfm.yaml syntax") from error
     except UnicodeError as error:
@@ -59,12 +61,14 @@ def load_config(dotfiles_root):
     normalized = _load_schema_paths(config)
     if normalized is not None:
         config["dotfiles"] = normalized
+    # YAML may contain additional top-level keys; preserve them at the raw
+    # boundary while exposing the validated portion through RawConfig.
     return config
 
 
-def save_config(dotfiles_root, config):
+def save_config(dotfiles_root: str, config: RawConfig) -> None:
     """Persist a dotfile mapping atomically (and durably where supported)."""
-    config_to_save = config
+    config_to_save: Any = config
     normalized = _save_schema_paths(config)
     if normalized is not None:
         config_to_save = dict(config)
@@ -84,7 +88,7 @@ def save_config(dotfiles_root, config):
             os.unlink(temporary_path)
 
 
-def _canonical_saved_key(key):
+def _canonical_saved_key(key: Any) -> Optional[str]:
     """Return a canonical YAML saved key, accepting either separator."""
     if not isinstance(key, str) or not key:
         return None
@@ -94,7 +98,7 @@ def _canonical_saved_key(key):
     return internal[len("files/") :]
 
 
-def _load_schema_paths(config):
+def _load_schema_paths(config: Any) -> Optional[Dict[str, Any]]:
     """Convert YAML saved keys to the internal ``files/`` namespace."""
     if not isinstance(config, dict) or not isinstance(config.get("dotfiles"), dict):
         return None
@@ -124,7 +128,7 @@ def _load_schema_paths(config):
     return normalized
 
 
-def _save_schema_paths(config):
+def _save_schema_paths(config: Any) -> Optional[Dict[str, Any]]:
     """Convert internal ``files/`` saved keys to YAML keys."""
     if not isinstance(config, dict) or not isinstance(config.get("dotfiles"), dict):
         return None

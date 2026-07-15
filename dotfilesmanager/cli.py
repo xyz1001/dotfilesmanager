@@ -5,13 +5,14 @@ import os
 import re
 import sys
 from dataclasses import dataclass
-from typing import Any, Dict, Optional, Set
+from typing import Any, Dict, Optional, Set, cast
 
 import inquirer
 from docopt import docopt
 from inquirer.errors import ValidationError
 
 from . import config, operations, windows
+from ._types import Config
 
 USAGE = """
 dotfile管理工具(dotfiles manager)，dotfile指保存配置信息的文件或包含配置文件的文件夹
@@ -249,7 +250,7 @@ def _preconfirm_install(abs_save_path, dotfiles_config, root, force):
         if install is None:
             continue
         saved = operations.key_to_save_path(rel_path, root)
-        state = operations._link_state(saved, install)
+        state = operations._install_link_state(saved, install)
         if state == "correct":
             continue
         if state in ("missing", "dangling", "sync") or force:
@@ -361,6 +362,7 @@ def _prepare_direct_command(command, args, root, dry_run):
     errors = operations.validate_config(dotfiles_config, root)
     if errors:
         _fail(errors[0])
+    dotfiles_config = cast(Config, dotfiles_config)
     original_config = copy.deepcopy(dotfiles_config)
     # Target selection merges mappings.  Keep that derived state off the loaded
     # object so preparation remains read-only (especially for dry-runs).
@@ -482,6 +484,7 @@ def _doctor(root):
         dotfiles_config = _load_config(root)
         problems.extend(operations.validate_config(dotfiles_config, root))
         if not problems:
+            dotfiles_config = cast(Config, dotfiles_config)
             for rel_path in dotfiles_config["dotfiles"]:
                 saved = operations.key_to_save_path(rel_path, root)
                 if not os.path.lexists(saved):

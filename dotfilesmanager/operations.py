@@ -15,20 +15,30 @@ import sys
 import uuid
 from dataclasses import dataclass, field
 from stat import S_ISDIR
+from typing import Any, Dict, List, Optional, Set, cast, overload
 
 from platformdirs.macos import MacOS
 from platformdirs.unix import Unix
 from platformdirs.windows import Windows
 
 from . import windows
+from ._types import (
+    Config,
+    ConfirmCallback,
+    InstallApprovalMap,
+    LinkState,
+    RawConfig,
+    SystemConfig,
+    Targets,
+)
 
 
 @dataclass
 class OperationResult:
     """Outcome data that a CLI (or future adapter) can render."""
 
-    config: dict
-    messages: list = field(default_factory=list)
+    config: Config
+    messages: List[str] = field(default_factory=list)
 
 
 VIEW_DIRECTORY = "view"
@@ -66,7 +76,15 @@ def os_name():
     return "android" if system == "android" else system
 
 
-def expanduser(path):
+@overload
+def expanduser(path: str) -> str: ...
+
+
+@overload
+def expanduser(path: None) -> None: ...
+
+
+def expanduser(path: Optional[str]) -> Optional[str]:
     if path is None:
         return None
     if os_name() != "windows":
@@ -78,13 +96,29 @@ def expanduser(path):
     return path
 
 
-def normalize_path(path):
+@overload
+def normalize_path(path: str) -> str: ...
+
+
+@overload
+def normalize_path(path: None) -> None: ...
+
+
+def normalize_path(path: Optional[str]) -> Optional[str]:
     if path is None:
         return None
     return os.path.abspath(os.path.normpath(expanduser(path)))
 
 
-def shrinkuser(path):
+@overload
+def shrinkuser(path: str) -> str: ...
+
+
+@overload
+def shrinkuser(path: None) -> None: ...
+
+
+def shrinkuser(path: Optional[str]) -> Optional[str]:
     if path is None:
         return None
     home = str(os.path.expanduser("~"))
@@ -165,7 +199,7 @@ def _is_save_key(save_key):
     return canonical_save_key(save_key) is not None
 
 
-def raw_save_key(config, save_key):
+def raw_save_key(config: Config, save_key: str) -> Optional[str]:
     """Find the unique raw YAML key for a canonical or raw saved-object key."""
     return (
         save_key
@@ -193,7 +227,7 @@ def _same_path(left, right):
     )
 
 
-def validate_mutation_paths(paths, dotfiles_root):
+def validate_mutation_paths(paths: List[str], dotfiles_root: str) -> Optional[str]:
     """Reject protected targets and existing symlink parents before mutation."""
     root = os.path.abspath(dotfiles_root)
     if os.path.lexists(root) and _is_link_or_reparse(root):
@@ -229,7 +263,7 @@ def _is_link_or_reparse(path):
     return bool(getattr(os.lstat(path), "st_file_attributes", 0) & 0x400)
 
 
-def validate_view_mutation_root(dotfiles_root):
+def validate_view_mutation_root(dotfiles_root: str) -> Optional[str]:
     """Ensure rebuilding view cannot traverse a substituted root or parent."""
     root = os.path.abspath(dotfiles_root)
     if os.path.lexists(root) and _is_link_or_reparse(root):
@@ -242,7 +276,7 @@ def validate_view_mutation_root(dotfiles_root):
     return None
 
 
-def validate_add(install_path, system, dotfiles_root):
+def validate_add(install_path: str, system: bool, dotfiles_root: str) -> Optional[str]:
     if not os.path.isfile(install_path) and not os.path.isdir(install_path):
         return f"{install_path} is not valid file or directory"
     if _is_within(install_path, dotfiles_root):
@@ -270,7 +304,9 @@ def _remove_save_path(path, dotfiles_root):
     return os.path.abspath(os.path.normpath(target_path))
 
 
-def validate_remove(path, dotfiles_root, resolved_save_path=None):
+def validate_remove(
+    path: str, dotfiles_root: str, resolved_save_path: Optional[str] = None
+) -> Optional[str]:
     target_path = resolved_save_path or _remove_save_path(path, dotfiles_root)
     if not _is_within(target_path, os.path.join(dotfiles_root, "files")):
         return f"{path} is not in dotfiles"
@@ -279,7 +315,7 @@ def validate_remove(path, dotfiles_root, resolved_save_path=None):
     return None
 
 
-def validate_config(config, dotfiles_root):
+def validate_config(config: RawConfig, dotfiles_root: str) -> List[str]:
     """Return validation errors before configuration-derived paths are touched."""
     errors = []
     if not isinstance(config, dict) or not isinstance(config.get("dotfiles"), dict):
@@ -336,7 +372,7 @@ def validate_config(config, dotfiles_root):
     return errors
 
 
-def validate_save_path(path, dotfiles_root):
+def validate_save_path(path: Optional[str], dotfiles_root: str) -> Optional[str]:
     if path is None or not _is_within(path, os.path.join(dotfiles_root, "files")):
         return f"{path} is not in dotfiles"
     relative = save_path_to_key(path, dotfiles_root)
@@ -450,7 +486,7 @@ def _view_target_path(system, path):
         else:
             namespace, tail = "legacy", path
         parts = tail.split("/")
-    logical = []
+    logical: List[str] = []
     for part in parts:
         if part in ("", "."):
             continue
@@ -484,15 +520,15 @@ def _is_excluded_view_source(path, root):
     )
 
 
-def plan_view(config, dotfiles_root):
+def plan_view(config: Config, dotfiles_root: str) -> List[ViewEntry]:
     """Validate and return links for every configured platform's generated view."""
     root = os.path.abspath(dotfiles_root)
     real_root = os.path.realpath(root)
     current_system = os_name()
     candidates = []
     entries = []
-    logical_paths = []
-    projected_paths = []
+    logical_paths: List[Any] = []
+    projected_paths: List[Any] = []
     for rel_save_path, systems in config["dotfiles"].items():
         saved = key_to_save_path(rel_save_path, root)
         error = validate_saved_object(saved, root)
@@ -546,7 +582,7 @@ def plan_view(config, dotfiles_root):
         _view_entry_path(view_root, system, namespace, parts)
         for system, namespace, parts, _saved, _is_directory in candidates
     ]
-    projection_groups = {}
+    projection_groups: Dict[Any, List[int]] = {}
     for index, view_path in enumerate(initial_paths):
         projection_key = _view_projection_components(view_path, view_root)
         projection_groups.setdefault(projection_key, []).append(index)
@@ -632,7 +668,7 @@ def validate_view_root(dotfiles_root, force=False):
     return None
 
 
-def view(config, dotfiles_root, force=False):
+def view(config: Config, dotfiles_root: str, force: bool = False) -> OperationResult:
     """Rebuild the generated readable view from a prevalidated configuration."""
     entries = plan_view(config, dotfiles_root)
     error = validate_view_root(dotfiles_root, force)
@@ -683,13 +719,15 @@ def view(config, dotfiles_root, force=False):
     return OperationResult(config, [f"View {len(entries)} item(s)"])
 
 
-def validate_install_target(path, dotfiles_root):
+def validate_install_target(path: str, dotfiles_root: str) -> Optional[str]:
     if not _is_within(path, os.path.expanduser("~")) or _is_within(path, dotfiles_root):
         return f"{path} must be in home and outside dotfiles"
     return None
 
 
-def parse_target_mappings(values, current_system=None):
+def parse_target_mappings(
+    values: Optional[List[str]], current_system: Optional[str] = None
+) -> Targets:
     """Parse repeated SYSTEM=~/path options without consulting the local OS."""
     current_system = current_system or os_name()
     targets = {}
@@ -710,7 +748,7 @@ def parse_target_mappings(values, current_system=None):
     return targets
 
 
-def validate_foreign_target(system, path):
+def validate_foreign_target(system: str, path: str) -> Optional[str]:
     """Lexically validate a portable, home-relative foreign install path."""
     if system not in SUPPORTED_SYSTEMS:
         return f"unsupported target system: {system}"
@@ -755,7 +793,7 @@ def is_platform_specific_save_path(rel_save_path):
     )
 
 
-def merge_targets(config, rel_save_path, targets):
+def merge_targets(config: Config, rel_save_path: str, targets: Targets) -> Config:
     """Return a copy with compatible foreign mappings added, never replaced."""
     if is_platform_specific_save_path(rel_save_path) and targets:
         raise ValueError("platform-specific saved objects cannot have external targets")
@@ -763,7 +801,9 @@ def merge_targets(config, rel_save_path, targets):
     raw_key = raw_save_key(merged, rel_save_path)
     if raw_key is None:
         raw_key = canonical_save_key(rel_save_path)
-    systems = merged["dotfiles"].setdefault(raw_key, {})
+    raw_key = cast(str, raw_key)
+    empty_systems: Dict[str, SystemConfig] = {}
+    systems = merged["dotfiles"].setdefault(raw_key, empty_systems)
     for system, path in targets.items():
         error = validate_foreign_target(system, path)
         if error:
@@ -777,7 +817,7 @@ def merge_targets(config, rel_save_path, targets):
     return merged
 
 
-def target_paths_equal(system, first, second):
+def target_paths_equal(system: str, first: Any, second: Any) -> bool:
     """Compare target data in its target platform's path semantics."""
     if not isinstance(first, str) or not isinstance(second, str):
         return False
@@ -822,16 +862,16 @@ def _current_category_roots():
     """Read public category roots only for the current source classification."""
     current = os_name()
     if current in ("linux", "android"):
-        provider = Unix(appname=None, ensure_exists=False)
+        provider: Any = Unix(appname=None, ensure_exists=False)
         return {
             "config": provider.user_config_dir,
             "data": provider.user_data_dir,
         }
     if current == "darwin":
-        provider = MacOS(appname=None, ensure_exists=False)
+        provider_darwin: Any = MacOS(appname=None, ensure_exists=False)
         return {
-            "config": provider.user_config_dir,
-            "data": provider.user_data_dir,
+            "config": provider_darwin.user_config_dir,
+            "data": provider_darwin.user_data_dir,
         }
     if current == "windows":
         roaming = Windows(appname=None, roaming=True, ensure_exists=False)
@@ -847,11 +887,11 @@ def _current_direct_only_roots():
     """Current roots that must not be mistaken for a CONFIG/DATA descendant."""
     current = os_name()
     if current in ("linux", "android"):
-        provider = Unix(appname=None, ensure_exists=False)
+        provider: Any = Unix(appname=None, ensure_exists=False)
         return (provider.user_cache_dir, provider.user_state_dir, provider.user_log_dir)
     if current == "darwin":
-        provider = MacOS(appname=None, ensure_exists=False)
-        return (provider.user_cache_dir, provider.user_log_dir)
+        provider_darwin: Any = MacOS(appname=None, ensure_exists=False)
+        return (provider_darwin.user_cache_dir, provider_darwin.user_log_dir)
     if current == "windows":
         return (Windows(appname=None, roaming=False, ensure_exists=False).user_log_dir,)
     return ()
@@ -938,7 +978,7 @@ def target_candidates(install_path, system):
     return [(path, path) for path in deduplicated]
 
 
-def validate_saved_object(path, dotfiles_root):
+def validate_saved_object(path: str, dotfiles_root: str) -> Optional[str]:
     error = validate_save_path(path, dotfiles_root)
     if error:
         return error
@@ -947,7 +987,9 @@ def validate_saved_object(path, dotfiles_root):
     return None
 
 
-def validate_install_sources(config, dotfiles_root, abs_save_path=None):
+def validate_install_sources(
+    config: Config, dotfiles_root: str, abs_save_path: Optional[str] = None
+) -> Optional[str]:
     """Ensure every current-platform object to install exists before prompts."""
     selected = None
     if abs_save_path is not None:
@@ -964,7 +1006,12 @@ def validate_install_sources(config, dotfiles_root, abs_save_path=None):
     return None
 
 
-def validate_remove_destination(config, rel_save_path, dotfiles_root=None, force=False):
+def validate_remove_destination(
+    config: Config,
+    rel_save_path: str,
+    dotfiles_root: Optional[str] = None,
+    force: bool = False,
+) -> Optional[str]:
     """Do not let rm overwrite an unrelated file at its install destination."""
     install = get_path(config, rel_save_path)
     if (
@@ -991,18 +1038,19 @@ def validate_remove_destination(config, rel_save_path, dotfiles_root=None, force
     return None
 
 
-def set_path(config, rel_save_path, install_path):
+def set_path(config: Config, rel_save_path: str, install_path: str) -> Config:
     current_os = os_name()
     raw_key = raw_save_key(config, rel_save_path)
     if raw_key is None:
         raw_key = canonical_save_key(rel_save_path)
-    config["dotfiles"].setdefault(raw_key, {}).setdefault(current_os, {})["path"] = (
-        shrinkuser(install_path)
-    )
+    raw_key = cast(str, raw_key)
+    empty_systems: Dict[str, SystemConfig] = {}
+    systems = config["dotfiles"].setdefault(raw_key, empty_systems)
+    systems.setdefault(current_os, {"path": ""})["path"] = shrinkuser(install_path)
     return config
 
 
-def get_path(config, rel_save_path):
+def get_path(config: Config, rel_save_path: str) -> Optional[str]:
     raw_key = raw_save_key(config, rel_save_path)
     item = config["dotfiles"].get(raw_key, {}).get(os_name()) if raw_key else None
     return expanduser(item["path"]) if item is not None else None
@@ -1055,7 +1103,14 @@ def _remove_git_crypt_attribute(root, rel_save_path, is_directory):
             attributes.writelines(remaining)
 
 
-def add(install_path, system, config, dotfiles_root, targets=None, encrypt=False):
+def add(
+    install_path: str,
+    system: bool,
+    config: Config,
+    dotfiles_root: str,
+    targets: Optional[Targets] = None,
+    encrypt: bool = False,
+) -> OperationResult:
     error = validate_add(install_path, system, dotfiles_root)
     if error:
         raise ValueError(error)
@@ -1084,14 +1139,14 @@ def add(install_path, system, config, dotfiles_root, targets=None, encrypt=False
 
 
 def remove(
-    path,
-    config,
-    dotfiles_root,
-    force=False,
-    all_platforms=False,
-    resolved_save_path=None,
-    selected_systems=None,
-):
+    path: str,
+    config: Config,
+    dotfiles_root: str,
+    force: bool = False,
+    all_platforms: bool = False,
+    resolved_save_path: Optional[str] = None,
+    selected_systems: Optional[Set[str]] = None,
+) -> OperationResult:
     """Remove selected registrations, optionally using a pre-resolved saved path."""
     abs_save_path = resolved_save_path or _remove_save_path(path, dotfiles_root)
     rel_save_path = save_path_to_key(abs_save_path, dotfiles_root)
@@ -1115,6 +1170,7 @@ def remove(
         error = validate_remove_destination(config, rel_save_path, dotfiles_root, force)
         if error:
             raise ValueError(error)
+        raw_key = cast(str, raw_key)
 
         if os.path.lexists(install_path):
             if not os.path.islink(install_path) and not force:
@@ -1132,6 +1188,7 @@ def remove(
         _remove_git_crypt_attribute(dotfiles_root, rel_save_path, is_directory)
         return OperationResult(config, [f"Remove {rel_save_path}"])
 
+    raw_key = cast(str, raw_key)
     systems = config["dotfiles"].get(raw_key)
     if systems is None:
         return OperationResult(config)
@@ -1157,6 +1214,7 @@ def remove(
     error = validate_remove_destination(config, rel_save_path, dotfiles_root, force)
     if error:
         raise ValueError(error)
+    assert install_path is not None
 
     if os.path.lexists(install_path):
         if not os.path.islink(install_path) and not force:
@@ -1182,7 +1240,13 @@ def remove(
     return OperationResult(config, [f"Remove {rel_save_path}"])
 
 
-def install(abs_save_path, config, dotfiles_root, confirm_replace, accepted=None):
+def install(
+    abs_save_path: Optional[str],
+    config: Config,
+    dotfiles_root: str,
+    confirm_replace: ConfirmCallback,
+    accepted: Optional[InstallApprovalMap] = None,
+) -> OperationResult:
     rel_save_path = None
     if abs_save_path is not None:
         rel_save_path = save_path_to_key(abs_save_path, dotfiles_root)
@@ -1206,9 +1270,9 @@ def install(abs_save_path, config, dotfiles_root, confirm_replace, accepted=None
             continue
         item_abs_save_path = key_to_save_path(item_rel_save_path, dotfiles_root)
         candidates.append((item_rel_save_path, item_abs_save_path, item_install_path))
-    approved = []
+    approved: List[Any] = []
     for item_rel_save_path, item_abs_save_path, item_install_path in candidates:
-        state = _link_state(item_abs_save_path, item_install_path)
+        state = _install_link_state(item_abs_save_path, item_install_path)
         # An existing link to this exact saved object is already installed.
         # Keep it intact, including its relative target representation.
         if state == "correct":
@@ -1237,23 +1301,18 @@ def install(abs_save_path, config, dotfiles_root, confirm_replace, accepted=None
     for item_rel_save_path, item_abs_save_path, item_install_path, state in approved:
         # The preflight above already obtained consent; do not prompt again.
         if state == "sync":
+            assert item_install_path is not None
             shutil.copyfile(item_install_path, item_abs_save_path)
         if _make_link(item_abs_save_path, item_install_path, lambda _: True):
             messages.append(f"Install {item_rel_save_path} -> {item_install_path}")
     return OperationResult(config, messages)
 
 
-def _link_state(target, link):
+def _link_state(target: str, link: str) -> LinkState:
     """Classify a local link without changing it."""
     if not os.path.lexists(link):
         return "missing"
     if not os.path.islink(link):
-        if (
-            os.path.isfile(target)
-            and not os.path.islink(target)
-            and os.path.isfile(link)
-        ):
-            return "sync"
         return "conflict"
     if not os.path.exists(link):
         return "dangling"
@@ -1266,6 +1325,19 @@ def _link_state(target, link):
     ):
         return "correct"
     return "conflict"
+
+
+def _install_link_state(target: str, link: str) -> LinkState:
+    """Classify install destinations, including the install-only sync case."""
+    state = _link_state(target, link)
+    if state == "conflict" and (
+        os.path.isfile(target)
+        and not os.path.islink(target)
+        and not os.path.islink(link)
+        and os.path.isfile(link)
+    ):
+        return "sync"
+    return state
 
 
 def _current_paths_equal(first, second):
@@ -1295,14 +1367,14 @@ def validate_share_state(abs_save_path, install_path, config, dotfiles_root):
 
 
 def share(
-    abs_save_path,
-    install_path,
-    config,
-    dotfiles_root,
-    confirm_replace,
-    targets=None,
-    expected_state=None,
-):
+    abs_save_path: str,
+    install_path: str,
+    config: Config,
+    dotfiles_root: str,
+    confirm_replace: ConfirmCallback,
+    targets: Optional[Targets] = None,
+    expected_state: Optional[LinkState] = None,
+) -> OperationResult:
     rel_save_path = save_path_to_key(abs_save_path, dotfiles_root)
     raw_key = raw_save_key(config, rel_save_path)
     if raw_key is None:

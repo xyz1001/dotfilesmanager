@@ -10,6 +10,17 @@ permissions:
   contents: read
 
 jobs:
+  typecheck:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Install typecheck dependencies
+        run: python -m pip install -e '.[typecheck]'
+      - name: Run mypy
+        run: python -m mypy dotfilesmanager/_types.py dotfilesmanager/config.py dotfilesmanager/operations.py dotfilesmanager/windows.py
   test-and-build:
     runs-on: ubuntu-latest
     steps:

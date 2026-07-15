@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "dotfilesmanager"
-version = "1.13.2"
+version = "1.13.3"
 description = "dotfile管理工具，支持多平台"
 readme = "README.md"
 requires-python = ">=3.8"
@@ -36,6 +36,10 @@ py-modules = ["dfm"]
 
 [project.optional-dependencies]
 dev = ["build", "twine", "ruff", "pytest"]
+typecheck = [
+    "mypy>=1.14,<1.15",
+    "types-PyYAML>=6.0.12.20241221,<6.0.12.20250326",
+]
 
 [tool.ruff]
 target-version = "py38"
@@ -44,3 +48,13 @@ line-length = 88
 [tool.ruff.lint]
 select = ["E", "F", "I", "B", "UP"]
 ignore = ["E501"]
+
+[tool.mypy]
+python_version = "3.8"
+check_untyped_defs = true
+no_implicit_optional = true
+strict_equality = true
+warn_unused_configs = true
+warn_unused_ignores = true
+warn_redundant_casts = true
+files = ["dotfilesmanager/_types.py", "dotfilesmanager/config.py", "dotfilesmanager/operations.py", "dotfilesmanager/windows.py"]
