@@ -12,7 +12,7 @@ from typing import Any, Dict, Optional, Set, cast
 import click
 import questionary
 
-from . import config, operations, windows
+from . import config, encryption, operations, windows
 from ._types import Config
 
 
@@ -1019,6 +1019,30 @@ def doctor(ctx, **options):
 def setup(ctx):
     """Enable the Windows developer setting required for symbolic links."""
     return _run_click_command(ctx, "setup")
+
+
+@click_app.group(name="encrypt")
+def encrypt_group():
+    """Configure and operate value-level encryption."""
+
+
+@encrypt_group.command(name="init")
+@click.argument("recipient")
+@click.pass_context
+def encrypt_init(ctx, recipient):
+    """Create the data key and configure the Git filter."""
+    root = config.resolve_dotfiles_root(ctx.obj["root_options"].get("root"))
+    encryption.init(root, recipient)
+
+
+@encrypt_group.command(name="filter")
+@click.argument("kind", type=click.Choice(["clean", "smudge"]))
+@click.argument("filename")
+def encrypt_filter(kind, filename):
+    """Run the Git clean or smudge filter."""
+    encryption.filter_command(kind, filename)
+
+
 
 
 def _run_parsed_command(args):

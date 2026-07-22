@@ -160,3 +160,12 @@ This safely removes the symbolic link and **restores the original file or direct
 * **Version control recommendation**: We strongly recommend initializing the entire `~/dotfiles` directory as a Git repository and pushing it to GitHub or another platform for backup.
   > [!TIP]
   > We recommend adding `/view/` to your `.gitignore` to avoid committing generated temporary view files to the Git repository.
+
+### 🔐 Partial value encryption
+
+This feature requires `cryptography` and an installed GPG recipient key. In the
+repository, create `rules.json` with filename globs mapped to key lists, then run
+`dfm encrypt init RECIPIENT`. This creates the wrapped key, local
+`.git/line-crypt.key` cache, and Git filter attributes. Normal `git add`, commit,
+and checkout store deterministic `ENCv1:` values while the worktree stays
+plaintext. Delete `.git/line-crypt.key` to remove local key access.

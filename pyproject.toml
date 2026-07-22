@@ -23,6 +23,7 @@ dependencies = [
     "prompt-toolkit>=3.0.37,<3.0.52",
     "platformdirs==4.3.6",
     "PyYAML>=6.0",
+    "cryptography>=46.0.6,<47",
 ]
 
 [project.urls]
